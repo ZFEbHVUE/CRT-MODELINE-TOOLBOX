@@ -585,9 +585,21 @@ class App(tk.Tk):
         self.e_output.bind("<Return>",   lambda e: self._calc_gen())
         self.e_output.bind("<FocusOut>", lambda e: self._calc_gen())
 
+        # ---- Paste CRT Range (own visible row) ----
+        frm_paste_lf = ttk.LabelFrame(parent, text="Paste CRT Range  (crt_range0 format — press Enter or Parse)")
+        frm_paste_lf.grid(row=1, column=0, columnspan=2, padx=6, pady=4, sticky="ew")
+        self.e_crt_paste = tk.Entry(frm_paste_lf, bg=BG2, fg=YELLOW,
+                                     insertbackground=FG, font=FONT_M,
+                                     relief="flat", bd=4)
+        self.e_crt_paste.insert(0, "crt_range0  15625-16200, 49.50-65.00, 2.000, 4.700, 8.000, 0.064, 0.192, 1.024, 0, 0, 192, 288, 448, 576")
+        self.e_crt_paste.pack(side="left", fill="x", expand=True, padx=(6,6), pady=6)
+        self.e_crt_paste.bind("<Return>", lambda e: self._parse_crt_range())
+        ttk.Button(frm_paste_lf, text="Parse →  apply to sliders",
+                   command=self._parse_crt_range).pack(side="left", padx=(0,6), pady=6)
+
         # ---- Parameters sliders (left) ----
         frm_p = ttk.LabelFrame(parent, text="Parameters")
-        frm_p.grid(row=1, column=0, padx=6, pady=4, sticky="nsew")
+        frm_p.grid(row=2, column=0, padx=6, pady=4, sticky="nsew")
 
         self.sw_width  = SliderEntry(frm_p, "H Width (px)",  64, 3840, 1,     is_int=True, fmt="{:.0f}")
         self.sw_height = SliderEntry(frm_p, "V Height (px)", 32, 2160, 1,     is_int=True, fmt="{:.0f}")
@@ -604,7 +616,7 @@ class App(tk.Tk):
 
         # ---- CRT Range sliders (right) ----
         frm_r = ttk.LabelFrame(parent, text="CRT Range")
-        frm_r.grid(row=1, column=1, padx=6, pady=4, sticky="nsew")
+        frm_r.grid(row=2, column=1, padx=6, pady=4, sticky="nsew")
 
         self.sw_hfp = SliderEntry(frm_r, "H Front Porch (µs)", 0.05, 12.0, 0.001)
         self.sw_hs  = SliderEntry(frm_r, "H Sync (µs)",        0.05, 10.0, 0.001)
@@ -623,19 +635,20 @@ class App(tk.Tk):
         self.lbl_range_badge.pack(anchor="w", padx=8, pady=4)
 
         # ---- CRT Range text displays ----
-        frm_cf = ttk.LabelFrame(parent, text="CRT Range — Calamity values (fixed to preset)")
-        frm_cf.grid(row=2, column=0, columnspan=2, padx=6, pady=2, sticky="ew")
-        self.txt_crt_fixed = self._text_ro(frm_cf, height=1, width=90)
+        self.frm_cf = ttk.LabelFrame(parent, text="CRT Range — Calamity values (fixed to preset)")
+        self.frm_cf.grid(row=3, column=0, columnspan=2, padx=6, pady=2, sticky="ew")
+        self.txt_crt_fixed = self._text_ro(self.frm_cf, height=1, width=90)
         self.txt_crt_fixed.pack(fill="x", padx=4, pady=4)
 
         frm_cc = ttk.LabelFrame(parent, text="CRT Range — calculated from generated modeline")
-        frm_cc.grid(row=3, column=0, columnspan=2, padx=6, pady=2, sticky="ew")
+        frm_cc.grid(row=4, column=0, columnspan=2, padx=6, pady=2, sticky="ew")
         self.txt_crt_calc = self._text_ro(frm_cc, height=1, width=90)
         self.txt_crt_calc.pack(fill="x", padx=4, pady=4)
 
         # ---- Timings tree ----
         frm_t = ttk.LabelFrame(parent, text="Timings")
-        frm_t.grid(row=4, column=0, padx=6, pady=4, sticky="nsew")
+        frm_t.grid(row=5, column=0, padx=6, pady=4, sticky="nsew")
+        parent.rowconfigure(5, weight=1)
         cols = ("Parameter", "px/lines", "Time", "Unit")
         self.tree_gen = ttk.Treeview(frm_t, columns=cols, show="headings", height=11)
         for c in cols:
@@ -645,7 +658,7 @@ class App(tk.Tk):
 
         # ---- Results panel ----
         frm_res = ttk.Frame(parent)
-        frm_res.grid(row=4, column=1, padx=6, pady=4, sticky="nsew")
+        frm_res.grid(row=5, column=1, padx=6, pady=4, sticky="nsew")
 
         frm_m = ttk.LabelFrame(frm_res, text="Metrics")
         frm_m.pack(fill="x", pady=2)
@@ -769,6 +782,59 @@ class App(tk.Tk):
     # ==================================================================
     # LOGIC
     # ==================================================================
+    def _parse_crt_range(self):
+        import re
+        raw = self.e_crt_paste.get().strip()
+        # Strip optional "crt_range0" / "crt_range1" prefix
+        raw = re.sub(r'^crt_range\d*\s*', '', raw).strip()
+        parts = [p.strip() for p in raw.split(',')]
+        if len(parts) < 14:
+            messagebox.showerror("Parse error",
+                "Expected format:\n"
+                "crt_range0  hmin-hmax, vfmin-vfmax, hfp, hs, hbp, vfp, vs, vbp, 0, 0, pLmin, pLmax, iLmin, iLmax")
+            return
+        try:
+            hrange        = parts[0].split('-')
+            hmin, hmax    = float(hrange[0]), float(hrange[1])
+            vrange        = parts[1].split('-')
+            vfmin, vfmax  = float(vrange[0]), float(vrange[1])
+            hfp  = float(parts[2])
+            hs   = float(parts[3])
+            hbp  = float(parts[4])
+            vfp  = float(parts[5])
+            vs   = float(parts[6])
+            vbp  = float(parts[7])
+            pLmin = int(float(parts[10]))
+            pLmax = int(float(parts[11]))
+            iLmin = int(float(parts[12]))
+            iLmax = int(float(parts[13]))
+        except (ValueError, IndexError) as e:
+            messagebox.showerror("Parse error", f"Could not parse crt_range:\n{e}")
+            return
+
+        r = {"lb": "custom",
+             "hmin": hmin, "hmax": hmax, "vfmin": vfmin, "vfmax": vfmax,
+             "hfp": hfp, "hs": hs, "hbp": hbp,
+             "vfp": vfp, "vs": vs, "vbp": vbp,
+             "pLmin": pLmin, "pLmax": pLmax, "iLmin": iLmin, "iLmax": iLmax}
+
+        self._current_range = r
+        self.frm_cf.config(text="CRT Range — Custom (pasted)")
+        self.sw_hfp.set_value(hfp)
+        self.sw_hs.set_value(hs)
+        self.sw_hbp.set_value(hbp)
+        self.sw_vfp.set_value(vfp)
+        self.sw_vs.set_value(vs)
+        self.sw_vbp.set_value(vbp)
+        mid = (hmin + hmax) / 2 / 1000
+        self.sw_hfreq.set_value(round(mid, 3))
+        self.lbl_range_badge.config(text="custom")
+        self.cmb_range["values"] = ["custom"]
+        self.cmb_range.set("custom")
+        self._set_text(self.txt_crt_fixed,
+                       fmt_crt_range(r, hfp, hs, hbp, vfp, vs, vbp))
+        self._calc_gen()
+
     def _apply_preset(self):
         name = self.cmb_preset.get()
         p    = PRESETS.get(name)
@@ -800,6 +866,7 @@ class App(tk.Tk):
         self._set_text(self.txt_crt_fixed,
                        fmt_crt_range(r, r["hfp"], r["hs"], r["hbp"],
                                         r["vfp"], r["vs"], r["vbp"]))
+        self.frm_cf.config(text="CRT Range — Calamity values (fixed to preset)")
 
     def _on_range_select(self):
         name = self.cmb_preset.get()
