@@ -1430,15 +1430,15 @@ class App(tk.Tk):
         t = calc_timings(res)
 
         # ── Colours ────────────────────────────────────────────────────────────
-        C_ACT   = "#43a047"   # Active pixels     — green
-        C_HBP   = "#0d47a1"   # H Back Porch      — dark blue
-        C_HFP   = "#1976d2"   # H Front Porch     — normal blue
-        C_HSYNC = "#90caf9"   # H Sync            — light blue
-        C_VBP   = "#b71c1c"   # V Back Porch      — dark red
-        C_VFP   = "#e53935"   # V Front Porch     — normal red
-        C_VSYNC = "#ef9a9a"   # V Sync            — light red
+        C_ACT   = "#43a047"
+        C_HBP   = "#0d47a1"
+        C_HFP   = "#1976d2"
+        C_HSYNC = "#90caf9"
+        C_VBP   = "#b71c1c"
+        C_VFP   = "#e53935"
+        C_VSYNC = "#ef9a9a"
 
-        # ── Popup window ───────────────────────────────────────────────────────
+        # ── Popup ──────────────────────────────────────────────────────────────
         top = tk.Toplevel(self)
         name = f"{H}x{V}{'i' if interlaced else ''}"
         top.title(f"Signal Diagram — {name}  "
@@ -1447,126 +1447,125 @@ class App(tk.Tk):
         top.configure(bg=BG)
         top.resizable(True, True)
 
-        # ── Bottom info bar ────────────────────────────────────────────────────
-        info = (f"H total: {H_total} px  /  {t['H_total_us']:.3f} µs    "
-                f"V total: {V_total} lines  /  {t['V_total_ms']:.3f} ms    "
-                f"{'Interlaced' if interlaced else 'Progressive'}")
-        tk.Label(top, text=info, bg=BG, fg=YELLOW,
-                 font=("Monospace", 9)).pack(side="bottom", pady=(0, 6))
+        tk.Label(top,
+                 text=(f"H total: {H_total} px / {t['H_total_us']:.3f} µs    "
+                       f"V total: {V_total} lines / {t['V_total_ms']:.3f} ms    "
+                       f"{'Interlaced' if interlaced else 'Progressive'}"),
+                 bg=BG, fg=YELLOW, font=("Monospace", 9)).pack(side="bottom", pady=(0,6))
 
-        # ── Main frame: canvas left, legend right ──────────────────────────────
-        frm_main = tk.Frame(top, bg=BG)
-        frm_main.pack(fill="both", expand=True, padx=8, pady=8)
-
-        # ── Canvas ─────────────────────────────────────────────────────────────
-        CW, CH = 760, 520
+        # ── Canvas (full width) ────────────────────────────────────────────────
+        CW, CH = 820, 560
         sx = CW / H_total
         sy = CH / V_total
 
-        x_hbp  = 0
         x_act  = round(HBP  * sx)
-        x_hfp  = round((HBP + H) * sx)
+        x_hfp  = round((HBP + H)       * sx)
         x_sync = round((HBP + H + HFP) * sx)
-
-        y_vbp  = 0
         y_act  = round(VBP  * sy)
-        y_vfp  = round((VBP + V) * sy)
+        y_vfp  = round((VBP + V)       * sy)
         y_sync = round((VBP + V + VFP) * sy)
 
-        cv = tk.Canvas(frm_main, width=CW, height=CH, bg="#111122",
+        cv = tk.Canvas(top, width=CW, height=CH, bg="#111122",
                        highlightthickness=0)
-        cv.pack(side="left", padx=(0, 10))
+        cv.pack(padx=8, pady=8)
 
         def rect(x0, y0, x1, y1, fill):
-            cv.create_rectangle(x0, y0, x1, y1, fill=fill,
-                                outline="#222233", width=1)
+            cv.create_rectangle(x0, y0, x1, y1, fill=fill, outline="#222233", width=1)
 
-        def clabel(x, y, text, color="#ffffff", size=9, bold=False):
-            cv.create_text(x, y, text=text, fill=color,
-                           font=("Sans", size, "bold" if bold else "normal"),
-                           justify="center")
+        def clbl(x, y, txt, col="#ffffff", sz=9, bold=False, anchor="center"):
+            cv.create_text(x, y, text=txt, fill=col,
+                           font=("Sans", sz, "bold" if bold else "normal"),
+                           justify="center", anchor=anchor)
 
-        # Draw all regions
-        rect(0,       y_vbp, CW,    y_act,  C_VBP)   # V Back Porch (full width)
-        rect(x_act,   y_act, x_hfp, y_vfp,  C_ACT)   # Active area
-        rect(x_hbp,   y_act, x_act, CH,     C_HBP)   # H Back Porch
-        rect(x_hfp,   y_act, x_sync, CH,    C_HFP)   # H Front Porch
-        rect(x_sync,  y_act, CW,    CH,     C_HSYNC)  # H Sync
-        rect(x_act,   y_vfp, x_hfp, y_sync, C_VFP)   # V Front Porch
-        rect(x_act,   y_sync, x_hfp, CH,    C_VSYNC)  # V Sync
+        def dot(x, y, col):
+            cv.create_rectangle(x, y, x+10, y+10, fill=col, outline="")
 
-        # Labels inside regions (only if enough space)
-        cx_act  = (x_act  + x_hfp)  // 2
-        cy_act  = (y_act  + y_vfp)  // 2
-        clabel(cx_act, cy_act - 18, f"Active Pixels", "#ffffff", 12, True)
-        clabel(cx_act, cy_act,      f"{H} × {V}",     "#ffffff", 10)
-        clabel(cx_act, cy_act + 18, f"pclk={res['pclk']:.3f} MHz", "#b0bec5", 9)
+        # Draw regions
+        rect(0,       0,     CW,    y_act,  C_VBP)
+        rect(x_act,   y_act, x_hfp, y_vfp,  C_ACT)
+        rect(0,       y_act, x_act, CH,     C_HBP)
+        rect(x_hfp,   y_act, x_sync, CH,    C_HFP)
+        rect(x_sync,  y_act, CW,    CH,     C_HSYNC)
+        rect(x_act,   y_vfp, x_hfp, y_sync, C_VFP)
+        rect(x_act,   y_sync, x_hfp, CH,    C_VSYNC)
 
-        clabel(cx_act, y_act // 2,
-               f"V Back Porch  {VBP} lines", "#ffffff", 9)
+        # ── Labels on small zones ──────────────────────────────────────────────
+        cx_act = (x_act + x_hfp) // 2
+        cy_act = (y_act + y_vfp) // 2
 
-        if x_act > 40:
-            clabel(x_act // 2, (y_act + CH) // 2,
-                   f"H\nBack\nPorch\n{HBP}px", "#ffffff", 8)
-        if x_sync - x_hfp > 30:
-            clabel((x_hfp + x_sync) // 2, (y_act + CH) // 2,
-                   f"H\nFront\n{HFP}px", "#ffffff", 8)
+        # V Back Porch label (top band)
+        clbl(cx_act, y_act // 2, f"V Back Porch  {VBP} lines  /  {t['VBP_ms']:.3f} ms",
+             "#ffffff", 9)
+
+        # H Back Porch label (left strip)
+        if x_act > 30:
+            clbl(x_act // 2, (y_act + CH) // 2,
+                 f"H\nBack\n{HBP}px\n{t['HBP_us']:.2f}µs", "#ffffff", 8)
+
+        # H Front Porch
+        if x_sync - x_hfp > 28:
+            clbl((x_hfp + x_sync) // 2, (y_act + CH) // 2,
+                 f"H\nFront\n{HFP}px\n{t['HFP_us']:.2f}µs", "#ffffff", 8)
+
+        # H Sync
         if CW - x_sync > 20:
-            clabel((x_sync + CW) // 2, (y_act + CH) // 2,
-                   f"H\nSync\n{HSYNC}px", "#ffffff", 8)
+            clbl((x_sync + CW) // 2, (y_act + CH) // 2,
+                 f"HS\n{HSYNC}px\n{t['HSYNC_us']:.2f}µs", "#222233", 8)
+
+        # V Front Porch
         if y_sync - y_vfp > 12:
-            clabel(cx_act, (y_vfp + y_sync) // 2,
-                   f"V Front Porch  {VFP} lines", "#ffffff", 8)
+            clbl(cx_act, (y_vfp + y_sync) // 2,
+                 f"V Front Porch  {VFP} lines  /  {t['VFP_ms']:.3f} ms", "#ffffff", 8)
+
+        # V Sync
         if CH - y_sync > 10:
-            clabel(cx_act, (y_sync + CH) // 2,
-                   f"V Sync  {VSYNC} lines", "#ffffff", 8)
+            clbl(cx_act, (y_sync + CH) // 2,
+                 f"V Sync  {VSYNC} lines  /  {t['VSYNC_ms']:.3f} ms", "#333333", 8)
 
-        # ── Legend panel (right) ───────────────────────────────────────────────
-        frm_leg = tk.Frame(frm_main, bg=BG2, padx=10, pady=10)
-        frm_leg.pack(side="left", fill="y")
+        # ── Info inside green active area ──────────────────────────────────────
+        # Title
+        clbl(cx_act, cy_act - 90, f"Active Pixels  {H} × {V}",
+             "#ffffff", 13, bold=True)
+        clbl(cx_act, cy_act - 70,
+             f"pclk = {res['pclk']:.6f} MHz    "
+             f"Hfreq = {res['Hfreq']/1000:.6f} kHz    "
+             f"Vfreq = {res['Vfreq_actual']:.6f} Hz",
+             "#b0bec5", 9)
 
-        def leg_row(color, label, px_val, time_val, unit):
-            row = tk.Frame(frm_leg, bg=BG2)
-            row.pack(anchor="w", pady=2)
-            tk.Label(row, bg=color, width=3, height=1,
-                     relief="flat").pack(side="left", padx=(0, 8))
-            tk.Label(row, text=f"{label}",
-                     fg="#ffffff", bg=BG2,
-                     font=("Sans", 9, "bold"), width=16, anchor="w").pack(side="left")
-            tk.Label(row, text=f"{px_val}  ·  {time_val:.3f} {unit}",
-                     fg=FG2, bg=BG2,
-                     font=("Monospace", 9)).pack(side="left")
+        # Two-column legend inside green area
+        lx_h = cx_act - 160   # H column x
+        lx_v = cx_act + 60    # V column x
+        ly   = cy_act - 30    # start y
+        dy   = 22             # row height
 
-        tk.Label(frm_leg, text="Horizontal", fg=ACCENT, bg=BG2,
-                 font=("Sans", 10, "bold")).pack(anchor="w", pady=(0, 4))
-        leg_row(C_ACT,   "H active",       f"{H} px",     t['H_actif_us'], "µs")
-        leg_row(C_HBP,   "H Back Porch",   f"{HBP} px",   t['HBP_us'],    "µs")
-        leg_row(C_HFP,   "H Front Porch",  f"{HFP} px",   t['HFP_us'],    "µs")
-        leg_row(C_HSYNC, "H Sync",         f"{HSYNC} px", t['HSYNC_us'],  "µs")
-        leg_row(YELLOW,  "H total",        f"{H_total} px", t['H_total_us'], "µs")
+        # Column headers
+        clbl(lx_h, ly - 16, "─── Horizontal ───", ACCENT, 9, bold=True)
+        clbl(lx_v, ly - 16, "─── Vertical ───",   ACCENT, 9, bold=True)
 
-        tk.Label(frm_leg, text="Vertical", fg=ACCENT, bg=BG2,
-                 font=("Sans", 10, "bold")).pack(anchor="w", pady=(12, 4))
-        leg_row(C_ACT,   "V active",       f"{V} lines",      t['V_actif_ms'], "ms")
-        leg_row(C_VBP,   "V Back Porch",   f"{VBP} lines",    t['VBP_ms'],    "ms")
-        leg_row(C_VFP,   "V Front Porch",  f"{VFP} lines",    t['VFP_ms'],    "ms")
-        leg_row(C_VSYNC, "V Sync",         f"{VSYNC} lines",  t['VSYNC_ms'],  "ms")
-        leg_row(YELLOW,  "V total",        f"{V_total} lines", t['V_total_ms'], "ms")
+        h_rows = [
+            (C_ACT,   f"H active    {H} px       {t['H_actif_us']:.3f} µs"),
+            (C_HBP,   f"H Back      {HBP} px      {t['HBP_us']:.3f} µs"),
+            (C_HFP,   f"H Front     {HFP} px       {t['HFP_us']:.3f} µs"),
+            (C_HSYNC, f"H Sync      {HSYNC} px       {t['HSYNC_us']:.3f} µs"),
+            (YELLOW,  f"H total     {H_total} px     {t['H_total_us']:.3f} µs"),
+        ]
+        v_rows = [
+            (C_ACT,   f"V active    {V} lines   {t['V_actif_ms']:.3f} ms"),
+            (C_VBP,   f"V Back      {VBP} lines    {t['VBP_ms']:.3f} ms"),
+            (C_VFP,   f"V Front     {VFP} lines     {t['VFP_ms']:.3f} ms"),
+            (C_VSYNC, f"V Sync      {VSYNC} lines     {t['VSYNC_ms']:.3f} ms"),
+            (YELLOW,  f"V total     {V_total} lines   {t['V_total_ms']:.3f} ms"),
+        ]
 
-        tk.Label(frm_leg, text="Signal", fg=ACCENT, bg=BG2,
-                 font=("Sans", 10, "bold")).pack(anchor="w", pady=(12, 4))
-        for label, val in [
-            ("Pixel clock", f"{res['pclk']:.6f} MHz"),
-            ("Hfreq",       f"{res['Hfreq']/1000:.6f} kHz"),
-            ("Vfreq",       f"{res['Vfreq_actual']:.6f} Hz"),
-            ("Mode",        "Interlaced" if interlaced else "Progressive"),
-        ]:
-            row = tk.Frame(frm_leg, bg=BG2)
-            row.pack(anchor="w", pady=1)
-            tk.Label(row, text=f"{label:<16}", fg=FG2, bg=BG2,
-                     font=("Sans", 9, "bold")).pack(side="left")
-            tk.Label(row, text=val, fg=FG, bg=BG2,
-                     font=("Monospace", 9)).pack(side="left")
+        for i, (col, label) in enumerate(h_rows):
+            y = ly + i * dy
+            dot(lx_h - 110, y - 5, col)
+            clbl(lx_h, y, label, "#ffffff", 9, anchor="center")
+
+        for i, (col, label) in enumerate(v_rows):
+            y = ly + i * dy
+            dot(lx_v - 110, y - 5, col)
+            clbl(lx_v, y, label, "#ffffff", 9, anchor="center")
 
     def _save_crt_range(self):
         """Save the calculated CRT range (and modeline) to a named text file."""
