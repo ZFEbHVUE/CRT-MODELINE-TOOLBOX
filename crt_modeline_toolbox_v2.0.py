@@ -638,6 +638,7 @@ class App(tk.Tk):
         self.resizable(True, True)
         self.minsize(1050, 740)
         self._current_range = None
+        self._custom_mode   = False   # True after Paste — prevents range reload on Hfreq change
         # Style the dropdown listbox (can't be done via ttk.Style)
         self.option_add("*TCombobox*Listbox.background",       BG2)
         self.option_add("*TCombobox*Listbox.foreground",       FG)
@@ -1058,6 +1059,7 @@ class App(tk.Tk):
              "pLmin": pLmin, "pLmax": pLmax, "iLmin": iLmin, "iLmax": iLmax}
 
         self._current_range = r
+        self._custom_mode   = True
         self.frm_cf.config(text="CRT Range — Custom (pasted)")
         self.sw_hfp.set_value(hfp)
         self.sw_hs.set_value(hs)
@@ -1139,6 +1141,7 @@ class App(tk.Tk):
 
     def _load_range(self, r):
         self._current_range = r
+        self._custom_mode   = False   # back to Calamity preset mode
         self.sw_hfp.set_value(r["hfp"])
         self.sw_hs.set_value(r["hs"])
         self.sw_hbp.set_value(r["hbp"])
@@ -1170,7 +1173,8 @@ class App(tk.Tk):
         name     = self.cmb_preset.get()
         hfreq_hz = self.sw_hfreq.get_value() * 1000
         r        = select_range(name, hfreq_hz)
-        if r is not self._current_range:
+        # In custom mode: keep slider values intact, only recalculate output
+        if not self._custom_mode and r is not self._current_range:
             self._current_range = r
             self.sw_hfp.set_value(r["hfp"])
             self.sw_hs.set_value(r["hs"])
@@ -1183,6 +1187,7 @@ class App(tk.Tk):
             self._set_text(self.txt_crt_fixed,
                            fmt_crt_range(r, r["hfp"], r["hs"], r["hbp"],
                                             r["vfp"], r["vs"], r["vbp"]))
+            self.frm_cf.config(text="CRT Range — Calamity values (fixed to preset)")
         self._calc_gen()
 
     def _calc_from_pixels(self):
