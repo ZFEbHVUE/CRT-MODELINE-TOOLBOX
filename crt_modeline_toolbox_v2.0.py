@@ -8,7 +8,7 @@
 # ==============================================================================
 
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 import subprocess
 import math
 
@@ -605,6 +605,28 @@ def optimize_modeline(H, V, Hfreq_target, Vfreq_target, interlaced, r):
     )
 
 
+
+def _native_save_dialog(title="Save file", initialfile="file.txt"):
+    return filedialog.asksaveasfilename(
+        title=title, defaultextension=".txt",
+        filetypes=[("Text files", "*.txt"), ("INI files", "*.ini"),
+                   ("All files", "*.*")],
+        initialfile=initialfile
+    )
+
+
+def _native_open_dialog(title="Open file"):
+    return filedialog.askopenfilename(
+        title=title,
+        filetypes=[("Text files", "*.txt"), ("INI files", "*.ini"),
+                   ("All files", "*.*")]
+    )
+
+
+
+
+
+
 # ==============================================================================
 # APPLICATION
 # ==============================================================================
@@ -663,7 +685,7 @@ class App(tk.Tk):
 
     def _text_ro(self, parent, height=1, width=80):
         t = tk.Text(parent, height=height, width=width, bg=BG2, fg=YELLOW,
-                    font=FONT_M, relief="flat", bd=4, state="disabled", wrap="word")
+                    font=FONT_M, relief="flat", bd=4, state="disabled", wrap="char")
         return t
 
     def _set_text(self, w, text):
@@ -696,6 +718,35 @@ class App(tk.Tk):
     # GENERATE TAB
     # ==================================================================
     def _build_gen(self, parent):
+        # ---- Scrollable canvas wrapper ----
+        canvas = tk.Canvas(parent, bg=BG, highlightthickness=0)
+        vsb    = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        inner = ttk.Frame(canvas)
+        win   = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _on_inner_configure(e):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        def _on_canvas_configure(e):
+            canvas.itemconfig(win, width=e.width)
+        def _on_mousewheel(e):
+            canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+        def _on_scroll_up(e):
+            canvas.yview_scroll(-1, "units")
+        def _on_scroll_down(e):
+            canvas.yview_scroll(1, "units")
+
+        inner.bind("<Configure>", _on_inner_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        canvas.bind_all("<Button-4>",   _on_scroll_up)
+        canvas.bind_all("<Button-5>",   _on_scroll_down)
+
+        parent = inner   # all widgets use inner as parent from here
+
         parent.columnconfigure(0, weight=1)
         parent.columnconfigure(1, weight=1)
         parent.rowconfigure(4, weight=1)
@@ -782,19 +833,47 @@ class App(tk.Tk):
             sw.set_callback(self._calc_gen)
             sw.pack(fill="x", padx=6, pady=3)
 
-        self.lbl_range_badge = tk.Label(frm_r, text="15KHz",
-                                         fg=ACCENT, bg=BG, font=FONT_B)
-        self.lbl_range_badge.pack(anchor="w", padx=8, pady=4)
-
         # ---- CRT Range text displays ----
-        self.frm_cf = ttk.LabelFrame(parent, text="CRT Range — Calamity values (fixed to preset)")
-        self.frm_cf.grid(row=3, column=0, columnspan=2, padx=6, pady=2, sticky="ew")
-        self.txt_crt_fixed = self._text_ro(self.frm_cf, height=1, width=90)
+        # ---- Direct Porch Adjustment in pixels / lines (row 3) ----
+        frm_px = ttk.LabelFrame(parent, text="Direct Porch Adjustment  (px / lines)")
+        frm_px.grid(row=3, column=0, columnspan=2, padx=6, pady=4, sticky="ew")
+        frm_px.columnconfigure(0, weight=1)
+        frm_px.columnconfigure(1, weight=1)
+
+        frm_px_h = ttk.Frame(frm_px)
+        frm_px_h.grid(row=0, column=0, padx=4, pady=2, sticky="ew")
+        frm_px_v = ttk.Frame(frm_px)
+        frm_px_v.grid(row=0, column=1, padx=4, pady=2, sticky="ew")
+
+        self.sw_hfp_px = SliderEntry(frm_px_h, "H Front Porch (px)", 1, 300, 1, is_int=True, fmt="{:.0f}", slider_len=140)
+        self.sw_hs_px  = SliderEntry(frm_px_h, "H Sync (px)",        1, 300, 1, is_int=True, fmt="{:.0f}", slider_len=140)
+        self.sw_hbp_px = SliderEntry(frm_px_h, "H Back Porch (px)",  1, 500, 1, is_int=True, fmt="{:.0f}", slider_len=140)
+
+        self.sw_vfp_px = SliderEntry(frm_px_v, "V Front Porch (lines)", 1, 100, 1, is_int=True, fmt="{:.0f}", slider_len=140)
+        self.sw_vs_px  = SliderEntry(frm_px_v, "V Sync (lines)",        1, 100, 1, is_int=True, fmt="{:.0f}", slider_len=140)
+        self.sw_vbp_px = SliderEntry(frm_px_v, "V Back Porch (lines)",  1, 200, 1, is_int=True, fmt="{:.0f}", slider_len=140)
+
+        for sw in (self.sw_hfp_px, self.sw_hs_px, self.sw_hbp_px):
+            sw.set_callback(self._calc_from_pixels)
+            sw.pack(fill="x", padx=4, pady=2)
+        for sw in (self.sw_vfp_px, self.sw_vs_px, self.sw_vbp_px):
+            sw.set_callback(self._calc_from_pixels)
+            sw.pack(fill="x", padx=4, pady=2)
+
+        # ---- CRT Range displays side by side (row 4) ----
+        frm_ranges = ttk.Frame(parent)
+        frm_ranges.grid(row=4, column=0, columnspan=2, padx=6, pady=2, sticky="ew")
+        frm_ranges.columnconfigure(0, weight=1)
+        frm_ranges.columnconfigure(1, weight=1)
+
+        self.frm_cf = ttk.LabelFrame(frm_ranges, text="CRT Range — Calamity values (fixed to preset)")
+        self.frm_cf.grid(row=0, column=0, padx=(0,4), pady=0, sticky="ew")
+        self.txt_crt_fixed = self._text_ro(self.frm_cf, height=2, width=44)
         self.txt_crt_fixed.pack(fill="x", padx=4, pady=4)
 
-        frm_cc = ttk.LabelFrame(parent, text="CRT Range — calculated from generated modeline")
-        frm_cc.grid(row=4, column=0, columnspan=2, padx=6, pady=2, sticky="ew")
-        self.txt_crt_calc = self._text_ro(frm_cc, height=1, width=90)
+        frm_cc = ttk.LabelFrame(frm_ranges, text="CRT Range — calculated from generated modeline")
+        frm_cc.grid(row=0, column=1, padx=(4,0), pady=0, sticky="ew")
+        self.txt_crt_calc = self._text_ro(frm_cc, height=2, width=44)
         self.txt_crt_calc.pack(fill="x", padx=4, pady=4)
 
         # ---- Timings tree ----
@@ -847,7 +926,11 @@ class App(tk.Tk):
         ttk.Button(frm_btn, text="Apply xrandr",
                    command=self._apply_xrandr).pack(side="left", padx=4)
         ttk.Button(frm_btn, text="⚡ Optimise (LS)",
-                   command=self._optimise_ls).pack(side="left", padx=(16,4))
+                   command=self._optimise_ls).pack(side="left", padx=(16, 4))
+        ttk.Button(frm_btn, text="💾 Save CRT Range",
+                   command=self._save_crt_range).pack(side="left", padx=4)
+        ttk.Button(frm_btn, text="📂 Load CRT Range",
+                   command=self._load_crt_range).pack(side="left", padx=4)
         self.lbl_ls_error = tk.Label(frm_btn, text="", fg=YELLOW, bg=BG, font=FONT_S)
         self.lbl_ls_error.pack(side="left", padx=4)
 
@@ -984,7 +1067,6 @@ class App(tk.Tk):
         self.sw_vbp.set_value(vbp)
         mid = (hmin + hmax) / 2 / 1000
         self.sw_hfreq.set_value(round(mid, 3))
-        self.lbl_range_badge.config(text="custom")
         self.cmb_range["values"] = ["custom"]
         self.cmb_range.set("custom")
         self._set_text(self.txt_crt_fixed,
@@ -1021,6 +1103,14 @@ class App(tk.Tk):
         self.sw_vs.set_value( round(t["VSYNC_ms"],  3))
         self.sw_vbp.set_value(round(t["VBP_ms"],   3))
 
+        # Sync pixel sliders
+        self.sw_hfp_px.set_value(res["HFP"])
+        self.sw_hs_px.set_value( res["HSYNC"])
+        self.sw_hbp_px.set_value(res["HBP"])
+        self.sw_vfp_px.set_value(res["VFP"])
+        self.sw_vs_px.set_value( res["VSYNC"])
+        self.sw_vbp_px.set_value(res["VBP"])
+
         # Show Vfreq error
         ve = res["Vfreq_error"]
         if ve < 1e-6:
@@ -1030,7 +1120,7 @@ class App(tk.Tk):
                 text=f"Vfreq error: {ve:.6f} Hz", fg=YELLOW)
 
         # Refresh display
-        self._calc_gen()
+        self._refresh_display(res, r_live)
 
     def _apply_preset(self):
         name = self.cmb_preset.get()
@@ -1057,7 +1147,6 @@ class App(tk.Tk):
         self.sw_vbp.set_value(r["vbp"])
         mid = (r["hmin"] + r["hmax"]) / 2 / 1000
         self.sw_hfreq.set_value(round(mid, 3))
-        self.lbl_range_badge.config(text=r["lb"])
         if r["lb"] in self.cmb_range["values"]:
             self.cmb_range.set(r["lb"])
         self._set_text(self.txt_crt_fixed,
@@ -1089,13 +1178,68 @@ class App(tk.Tk):
             self.sw_vfp.set_value(r["vfp"])
             self.sw_vs.set_value(r["vs"])
             self.sw_vbp.set_value(r["vbp"])
-            self.lbl_range_badge.config(text=r["lb"])
             if r["lb"] in self.cmb_range["values"]:
                 self.cmb_range.set(r["lb"])
             self._set_text(self.txt_crt_fixed,
                            fmt_crt_range(r, r["hfp"], r["hs"], r["hbp"],
                                             r["vfp"], r["vs"], r["vbp"]))
         self._calc_gen()
+
+    def _calc_from_pixels(self):
+        """Recalculate modeline from direct pixel/line porch values."""
+        try:
+            H   = self.sw_width.get_value()
+            V   = self.sw_height.get_value()
+            Hf  = self.sw_hfreq.get_value() * 1000
+            i   = self.var_interlaced.get()
+            Div = 2 if i else 1
+            r   = self._current_range or PRESETS["Arcade 15kHz"]["ranges"][0]
+
+            HFP   = int(self.sw_hfp_px.get_value())
+            HSYNC = int(self.sw_hs_px.get_value())
+            HBP   = int(self.sw_hbp_px.get_value())
+            VFP   = int(self.sw_vfp_px.get_value())
+            VSYNC = int(self.sw_vs_px.get_value())
+            VBP   = int(self.sw_vbp_px.get_value())
+
+            H_total = H + HFP + HSYNC + HBP
+            V_total = V + VFP + VSYNC + VBP
+            pclk    = Hf * H_total / 1e6
+            Vf_act  = Hf * Div / V_total
+
+            # Back-calculate µs/ms and update time sliders
+            hfp_us = HFP   / H_total / Hf * 1e6
+            hs_us  = HSYNC / H_total / Hf * 1e6
+            hbp_us = HBP   / H_total / Hf * 1e6
+            vfp_ms = VFP   / V_total / Vf_act * 1e3
+            vs_ms  = VSYNC / V_total / Vf_act * 1e3
+            vbp_ms = VBP   / V_total / Vf_act * 1e3
+
+            self.sw_hfp.set_value(round(hfp_us, 3))
+            self.sw_hs.set_value( round(hs_us,  3))
+            self.sw_hbp.set_value(round(hbp_us, 3))
+            self.sw_vfp.set_value(round(vfp_ms, 3))
+            self.sw_vs.set_value( round(vs_ms,  3))
+            self.sw_vbp.set_value(round(vbp_ms, 3))
+
+            # Build result dict directly from pixel values
+            res = dict(
+                X1=H,  X2=H+HFP, X3=H+HFP+HSYNC,  X4=H_total,
+                Y1=V,  Y2=V+VFP, Y3=V+VFP+VSYNC,   Y4=V_total,
+                HFP=HFP, HSYNC=HSYNC, HBP=HBP,
+                VFP=VFP, VSYNC=VSYNC, VBP=VBP,
+                pclk=pclk, Hfreq=Hf, Vfreq_actual=Vf_act,
+                interlaced=i
+            )
+            r_live = {
+                "hfp": hfp_us, "hs": hs_us, "hbp": hbp_us,
+                "vfp": vfp_ms, "vs": vs_ms, "vbp": vbp_ms,
+                **{k: r[k] for k in ("hmin","hmax","vfmin","vfmax",
+                                      "pLmin","pLmax","iLmin","iLmax")}
+            }
+            self._refresh_display(res, r_live)
+        except Exception:
+            return
 
     def _calc_gen(self):
         try:
@@ -1116,7 +1260,21 @@ class App(tk.Tk):
             return
 
         res = calculate_from_range(H, V, Hf, Vf, i, r_live)
+        # Sync pixel sliders from computed result
+        self.sw_hfp_px.set_value(res["HFP"])
+        self.sw_hs_px.set_value( res["HSYNC"])
+        self.sw_hbp_px.set_value(res["HBP"])
+        self.sw_vfp_px.set_value(res["VFP"])
+        self.sw_vs_px.set_value( res["VSYNC"])
+        self.sw_vbp_px.set_value(res["VBP"])
+        self._refresh_display(res, r_live)
+
+    def _refresh_display(self, res, r_live):
         t   = calc_timings(res)
+        Hf  = res["Hfreq"]
+        V   = res["Y1"]
+        i   = res["interlaced"]
+        out = self.e_output.get() or "DP-1"
 
         self.lbl_pclk.config( text=f"{res['pclk']:.6f} MHz")
         self.lbl_hfreq.config(text=f"{Hf/1000:.6f}")
@@ -1127,17 +1285,17 @@ class App(tk.Tk):
 
         self.tree_gen.delete(*self.tree_gen.get_children())
         for row in [
-            ("H active",      res["X1"],   f"{t['H_actif_us']:.3f}", "µs"),
-            ("H Front Porch", res["HFP"],  f"{t['HFP_us']:.3f}",     "µs"),
-            ("H Sync",        res["HSYNC"],f"{t['HSYNC_us']:.3f}",   "µs"),
-            ("H Back Porch",  res["HBP"],  f"{t['HBP_us']:.3f}",     "µs"),
-            ("H total",       res["X4"],   f"{t['H_total_us']:.3f}", "µs"),
+            ("H active",      res["X1"],    f"{t['H_actif_us']:.3f}", "µs"),
+            ("H Front Porch", res["HFP"],   f"{t['HFP_us']:.3f}",     "µs"),
+            ("H Sync",        res["HSYNC"], f"{t['HSYNC_us']:.3f}",   "µs"),
+            ("H Back Porch",  res["HBP"],   f"{t['HBP_us']:.3f}",     "µs"),
+            ("H total",       res["X4"],    f"{t['H_total_us']:.3f}", "µs"),
             ("—", "", "", ""),
-            ("V active",      res["Y1"],   f"{t['V_actif_ms']:.3f}", "ms"),
-            ("V Front Porch", res["VFP"],  f"{t['VFP_ms']:.3f}",     "ms"),
-            ("V Sync",        res["VSYNC"],f"{t['VSYNC_ms']:.3f}",   "ms"),
-            ("V Back Porch",  res["VBP"],  f"{t['VBP_ms']:.3f}",     "ms"),
-            ("V total",       res["Y4"],   f"{t['V_total_ms']:.3f}", "ms"),
+            ("V active",      res["Y1"],    f"{t['V_actif_ms']:.3f}", "ms"),
+            ("V Front Porch", res["VFP"],   f"{t['VFP_ms']:.3f}",     "ms"),
+            ("V Sync",        res["VSYNC"], f"{t['VSYNC_ms']:.3f}",   "ms"),
+            ("V Back Porch",  res["VBP"],   f"{t['VBP_ms']:.3f}",     "ms"),
+            ("V total",       res["Y4"],    f"{t['V_total_ms']:.3f}", "ms"),
         ]:
             self.tree_gen.insert("", "end", values=row)
 
@@ -1166,11 +1324,11 @@ class App(tk.Tk):
                                      t["VFP_ms"], t["VSYNC_ms"], t["VBP_ms"]))
 
         istr = " interlace" if i else ""
+        H    = res["X1"]
         name = f"{H}x{V}{'i' if i else ''}"
         ml   = (f"{res['pclk']:.6f} {res['X1']} {res['X2']} {res['X3']} {res['X4']} "
                 f"{res['Y1']} {res['Y2']} {res['Y3']} {res['Y4']}{istr} -hsync -vsync")
         self._set_text(self.txt_modeline, f'Modeline "{name}" {ml}')
-        out = self.e_output.get() or "DP-1"
         self._set_text(self.txt_xrandr,
                        f'xrandr --newmode "{name}" {ml}\n'
                        f'xrandr --addmode {out} "{name}"\n'
@@ -1247,6 +1405,105 @@ class App(tk.Tk):
                        f'xrandr --newmode "{ml_name}" {ml}\n'
                        f'xrandr --addmode {out} "{ml_name}"\n'
                        f'xrandr --output {out} --mode "{ml_name}"')
+
+    def _save_crt_range(self):
+        """Save the calculated CRT range (and modeline) to a named text file."""
+        self.txt_crt_calc.config(state="normal")
+        crt_calc = self.txt_crt_calc.get("1.0", "end").strip()
+        self.txt_crt_calc.config(state="disabled")
+
+        if not crt_calc:
+            messagebox.showwarning("Nothing to save", "Generate a modeline first.")
+            return
+
+        self.txt_crt_fixed.config(state="normal")
+        crt_fixed = self.txt_crt_fixed.get("1.0", "end").strip()
+        self.txt_crt_fixed.config(state="disabled")
+
+        self.txt_modeline.config(state="normal")
+        modeline = self.txt_modeline.get("1.0", "end").strip()
+        self.txt_modeline.config(state="disabled")
+
+        self.txt_xrandr.config(state="normal")
+        xrandr = self.txt_xrandr.get("1.0", "end").strip()
+        self.txt_xrandr.config(state="disabled")
+
+        filepath = _native_save_dialog(
+            title="Save CRT Range",
+            initialfile="my_crt_range.txt"
+        )
+        if not filepath:
+            return
+
+        monitor   = self.cmb_preset.get()
+        rang      = self.cmb_range.get()
+        H         = self.sw_width.get_value()
+        V         = self.sw_height.get_value()
+        hfreq     = self.sw_hfreq.get_value()
+        vfreq     = self.sw_vfreq.get_value()
+        interlaced = "Yes" if self.var_interlaced.get() else "No"
+
+        content = (
+            f"# CRT Modeline Toolbox — ZFEbHVUE\n"
+            f"# Monitor  : {monitor}  [{rang}]\n"
+            f"# Resolution: {int(H)}x{int(V)}{'i' if self.var_interlaced.get() else ''}  "
+            f"Hfreq={hfreq:.3f} kHz  Vfreq={vfreq:.3f} Hz  Interlaced={interlaced}\n"
+            f"\n"
+            f"# --- Calamity preset (reference) ---\n"
+            f"{crt_fixed}\n"
+            f"\n"
+            f"# --- Calculated from generated modeline ---\n"
+            f"{crt_calc}\n"
+            f"\n"
+            f"# --- Modeline ---\n"
+            f"{modeline}\n"
+            f"\n"
+            f"# --- xrandr commands ---\n"
+            f"{xrandr}\n"
+        )
+
+        try:
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(content)
+            messagebox.showinfo("Saved", f"CRT Range saved to:\n{filepath}")
+        except Exception as e:
+            messagebox.showerror("Save error", str(e))
+
+    def _load_crt_range(self):
+        """Load a previously saved CRT Range file and apply it to the sliders."""
+        filepath = _native_open_dialog(title="Load CRT Range file")
+        if not filepath:
+            return
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        except Exception as e:
+            messagebox.showerror("Load error", str(e))
+            return
+
+        # Find the calculated crt_range line (after the "Calculated" comment)
+        # Fallback: take the last crt_range0 line found
+        crt_line = None
+        after_calc = False
+        for line in lines:
+            stripped = line.strip()
+            if "Calculated from generated modeline" in stripped:
+                after_calc = True
+                continue
+            if stripped.startswith("crt_range"):
+                crt_line = stripped
+                if after_calc:
+                    break   # prefer the calculated one
+
+        if not crt_line:
+            messagebox.showerror("Load error",
+                "No crt_range line found in this file.")
+            return
+
+        # Reuse the existing paste field + parse logic
+        self.e_crt_paste.delete(0, "end")
+        self.e_crt_paste.insert(0, crt_line)
+        self._parse_crt_range()
 
     def _copy_xrandr(self):
         self.txt_xrandr.config(state="normal")
