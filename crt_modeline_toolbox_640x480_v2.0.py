@@ -610,7 +610,7 @@ class App(tk.Tk):
         metrics = [
             ("Pixel clock","lbl_pclk"), ("Hfreq (kHz)","lbl_hfreq"),
             ("Vfreq (Hz)", "lbl_vfreq"),("H total (px)","lbl_htot"),
-            ("V total (ln)","lbl_vtot"),("H blanking","lbl_hblk"),
+            ("V total (px)","lbl_vtot"),("H blanking","lbl_hblk"),
         ]
         for i,(label,attr) in enumerate(metrics):
             f = tk.Frame(frm_m, bg=BG2, padx=6, pady=2)
@@ -1086,12 +1086,19 @@ class App(tk.Tk):
         top.title(f"Diagram {H}x{V}{'i' if interlaced else ''}")
         top.configure(bg=BG); top.resizable(True,True)
         tk.Label(top,
-                 text=f"H:{H_total}px/{t['H_total_us']:.2f}µs  V:{V_total}L/{t['V_total_ms']:.2f}ms  {'Interlaced' if interlaced else 'Progressive'}",
+                 text=f"H:{H_total}px/{t['H_total_us']:.2f}µs  V:{V_total}px/{t['V_total_ms']:.2f}ms  {'Interlaced' if interlaced else 'Progressive'}",
                  bg=BG,fg=YELLOW,font=("Monospace",7)).pack(side="bottom",pady=(0,4))
         CW,CH=560,380
         sx=CW/H_total; sy=CH/V_total
         x_act=round(HBP*sx); x_hfp=round((HBP+H)*sx); x_sync=round((HBP+H+HFP)*sx)
-        y_act=round(VBP*sy); y_vfp=round((VBP+V)*sy); y_sync=round((VBP+V+VFP)*sy)
+        y_act=round(VBP*sy); y_vfp=round((VBP+V)*sy)
+
+        # Minimum 4px for V Front Porch and V Sync zones
+        MIN = 4
+        vfp_h   = max(round(VFP*sy), MIN)
+        vsync_h = max(round(VSYNC*sy), MIN)
+        y_sync  = min(y_vfp + vfp_h, CH - vsync_h)
+        y_send  = CH   # end always at canvas bottom
         cv=tk.Canvas(top,width=CW,height=CH,bg="#111122",highlightthickness=0)
         cv.pack(padx=6,pady=6)
         def rect(x0,y0,x1,y1,fill):
@@ -1111,12 +1118,12 @@ class App(tk.Tk):
         rect(x_act,y_sync,x_hfp,CH,C_VSYNC)
         cx=(x_act+x_hfp)//2; cy=(y_act+y_vfp)//2
         # Labels on small zones
-        clbl(cx,y_act//2,f"V Back Porch  {VBP}L / {t['VBP_ms']:.3f}ms","#fff",7)
+        clbl(cx,y_act//2,f"V Back Porch  {VBP}px / {t['VBP_ms']:.3f}ms","#fff",7)
         if x_act>20: clbl(x_act//2,(y_act+CH)//2,f"HBP\n{HBP}px\n{t['HBP_us']:.2f}µs","#fff",7)
         if x_sync-x_hfp>22: clbl((x_hfp+x_sync)//2,(y_act+CH)//2,f"HFP\n{HFP}px","#fff",7)
         if CW-x_sync>16: clbl((x_sync+CW)//2,(y_act+CH)//2,f"HS\n{HSYNC}","#222",7)
-        if y_sync-y_vfp>10: clbl(cx,(y_vfp+y_sync)//2,f"VFP {VFP}L","#fff",7)
-        if CH-y_sync>8: clbl(cx,(y_sync+CH)//2,f"VS {VSYNC}L","#333",7)
+        if y_sync-y_vfp>10: clbl(cx,(y_vfp+y_sync)//2,f"VFP {VFP}px","#fff",7)
+        if CH-y_sync>8: clbl(cx,(y_sync+CH)//2,f"VS {VSYNC}px","#333",7)
         clbl(cx, y_act + 22, f"Active  {H} × {V}", "#ffffff", 16, True)
         clbl(cx, y_act + 42, f"pclk {res['pclk']:.3f} MHz    Hfreq {res['Hfreq']/1000:.3f} kHz    Vfreq {res['Vfreq_actual']:.3f} Hz", "#000000", 10)
 
@@ -1126,33 +1133,42 @@ class App(tk.Tk):
         ly    = cy - 38
         dy    = 19
 
-        clbl(lx_h + 80, ly - 16, "── Horizontal ──", ACCENT, 9, True)
-        clbl(lx_v + 80, ly - 16, "── Vertical ──",   ACCENT, 9, True)
+        X_DOT  =   0
+        X_LBL  =  14
+        X_NUM  = 100
+        X_TIME = 106
+
+        clbl(lx_h + X_LBL, ly - 14, "── Horizontal ──", "#ffffff", 9, True, anchor="w")
+        clbl(lx_v + X_LBL, ly - 14, "── Vertical ──",   "#ffffff", 9, True, anchor="w")
 
         h_rows = [
-            (C_ACT,   f"H active  {H}px  {t['H_actif_us']:.2f}µs"),
-            (C_HBP,   f"H Back    {HBP}px  {t['HBP_us']:.2f}µs"),
-            (C_HFP,   f"H Front   {HFP}px  {t['HFP_us']:.2f}µs"),
-            (C_HSYNC, f"H Sync    {HSYNC}px  {t['HSYNC_us']:.2f}µs"),
-            (YELLOW,  f"H total   {H_total}px  {t['H_total_us']:.2f}µs"),
+            (C_ACT,   "H active", f"{H}",       f"{t['H_actif_us']:.2f}µs"),
+            (C_HBP,   "H Back",   f"{HBP}",     f"{t['HBP_us']:.2f}µs"),
+            (C_HFP,   "H Front",  f"{HFP}",     f"{t['HFP_us']:.2f}µs"),
+            (C_HSYNC, "H Sync",   f"{HSYNC}",   f"{t['HSYNC_us']:.2f}µs"),
+            (YELLOW,  "H total",  f"{H_total}", f"{t['H_total_us']:.2f}µs"),
         ]
         v_rows = [
-            (C_ACT,   f"V active  {V}L  {t['V_actif_ms']:.2f}ms"),
-            (C_VBP,   f"V Back    {VBP}L  {t['VBP_ms']:.2f}ms"),
-            (C_VFP,   f"V Front   {VFP}L  {t['VFP_ms']:.2f}ms"),
-            (C_VSYNC, f"V Sync    {VSYNC}L  {t['VSYNC_ms']:.2f}ms"),
-            (YELLOW,  f"V total   {V_total}L  {t['V_total_ms']:.2f}ms"),
+            (C_ACT,   "V active", f"{V}",       f"{t['V_actif_ms']:.2f}ms"),
+            (C_VBP,   "V Back",   f"{VBP}",     f"{t['VBP_ms']:.2f}ms"),
+            (C_VFP,   "V Front",  f"{VFP}",     f"{t['VFP_ms']:.2f}ms"),
+            (C_VSYNC, "V Sync",   f"{VSYNC}",   f"{t['VSYNC_ms']:.2f}ms"),
+            (YELLOW,  "V total",  f"{V_total}", f"{t['V_total_ms']:.2f}ms"),
         ]
 
-        for i, (col, lbl) in enumerate(h_rows):
+        for i, (col, lbl, num, tim) in enumerate(h_rows):
             y = ly + i * dy
-            dot(lx_h, y - 5, col)
-            clbl(lx_h + 14, y, lbl, "#fff", 9, anchor="w")
+            dot(lx_h + X_DOT, y - 5, col)
+            clbl(lx_h + X_LBL,  y, lbl, "#fff", 9, anchor="w")
+            clbl(lx_h + X_NUM,  y, f"{num}px", "#fff", 9, anchor="e")
+            clbl(lx_h + X_TIME, y, tim, "#ddd", 9, anchor="w")
 
-        for i, (col, lbl) in enumerate(v_rows):
+        for i, (col, lbl, num, tim) in enumerate(v_rows):
             y = ly + i * dy
-            dot(lx_v, y - 5, col)
-            clbl(lx_v + 14, y, lbl, "#fff", 9, anchor="w")
+            dot(lx_v + X_DOT, y - 5, col)
+            clbl(lx_v + X_LBL,  y, lbl, "#fff", 9, anchor="w")
+            clbl(lx_v + X_NUM,  y, f"{num}px", "#fff", 9, anchor="e")
+            clbl(lx_v + X_TIME, y, tim, "#ddd", 9, anchor="w")
 
 
 if __name__ == "__main__":

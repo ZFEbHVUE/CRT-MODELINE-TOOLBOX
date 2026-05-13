@@ -685,6 +685,21 @@ class App(tk.Tk):
         s.configure("Treeview.Heading", background=BG3, foreground=ACCENT, font=FONT_S)
         s.map("Treeview", background=[("selected", BG3)])
 
+    def _style_cmb(self, cmb):
+        """Force dark dropdown listbox — reliable on all Linux themes."""
+        def _fix():
+            try:
+                pw = cmb.tk.eval(f'ttk::combobox::PopdownWindow {cmb._w}')
+                cmb.tk.eval(
+                    f'{pw}.f.l configure '
+                    f'-background {BG2} -foreground {FG} '
+                    f'-selectbackground {ACCENT} -selectforeground {BG} '
+                    f'-font {{Sans 10}}'
+                )
+            except Exception:
+                pass
+        cmb.configure(postcommand=_fix)
+
     def _text_ro(self, parent, height=1, width=80):
         t = tk.Text(parent, height=height, width=width, bg=BG2, fg=YELLOW,
                     font=FONT_M, relief="flat", bd=4, state="disabled", wrap="char")
@@ -764,12 +779,14 @@ class App(tk.Tk):
         self.cmb_preset.set("Arcade 15kHz")
         self.cmb_preset.grid(row=0, column=1, padx=4, pady=4, sticky="w")
         self.cmb_preset.bind("<<ComboboxSelected>>", lambda e: self._apply_preset())
+        self._style_cmb(self.cmb_preset)
 
         tk.Label(frm_top, text="Range", fg=FG2, bg=BG, font=FONT_S).grid(
             row=0, column=2, padx=(20, 4), pady=4, sticky="w")
         self.cmb_range = ttk.Combobox(frm_top, values=[], state="readonly", width=14)
         self.cmb_range.grid(row=0, column=3, padx=4, pady=4, sticky="w")
         self.cmb_range.bind("<<ComboboxSelected>>", lambda e: self._on_range_select())
+        self._style_cmb(self.cmb_range)
 
         self.lbl_range_info = tk.Label(frm_top, text="", fg=YELLOW, bg=BG, font=FONT_S)
         self.lbl_range_info.grid(row=0, column=4, padx=8, sticky="w")
@@ -899,7 +916,7 @@ class App(tk.Tk):
         self.lbl_hfreq = self._metric(frm_m, "Hfreq (kHz)",     0, 1)
         self.lbl_vfreq = self._metric(frm_m, "Vfreq (Hz)",      0, 2)
         self.lbl_htot  = self._metric(frm_m, "H total (px)",    1, 0)
-        self.lbl_vtot  = self._metric(frm_m, "V total (lines)", 1, 1)
+        self.lbl_vtot  = self._metric(frm_m, "V total (px)", 1, 1)
         self.lbl_hblk  = self._metric(frm_m, "H blanking",      1, 2)
 
         frm_chk = ttk.LabelFrame(frm_res, text="Verification")
@@ -967,6 +984,7 @@ class App(tk.Tk):
         self.cmb_preset_v.set("Arcade 15kHz")
         self.cmb_preset_v.pack(side="left", padx=4)
         self.cmb_preset_v.bind("<<ComboboxSelected>>", lambda e: self._calc_ver())
+        self._style_cmb(self.cmb_preset_v)
         tk.Label(frm_sel, text="Output:", fg=FG2, bg=BG, font=FONT_S).pack(side="left", padx=8)
         self.e_output_v = tk.Entry(frm_sel, width=8, bg=BG2, fg=FG,
                                     insertbackground=FG, font=FONT_M, relief="flat", bd=2)
@@ -995,7 +1013,7 @@ class App(tk.Tk):
         self.lbl_v_hfreq = self._metric(frm_m, "Hfreq (kHz)",     0, 1)
         self.lbl_v_vfreq = self._metric(frm_m, "Vfreq (Hz)",      0, 2)
         self.lbl_v_htot  = self._metric(frm_m, "H total (px)",    1, 0)
-        self.lbl_v_vtot  = self._metric(frm_m, "V total (lines)", 1, 1)
+        self.lbl_v_vtot  = self._metric(frm_m, "V total (px)", 1, 1)
         self.lbl_v_mode  = self._metric(frm_m, "Mode",            1, 2)
 
         frm_chk = ttk.LabelFrame(frm_r, text="Verification")
@@ -1449,7 +1467,7 @@ class App(tk.Tk):
 
         tk.Label(top,
                  text=(f"H total: {H_total} px / {t['H_total_us']:.3f} µs    "
-                       f"V total: {V_total} lines / {t['V_total_ms']:.3f} ms    "
+                       f"V total: {V_total} px / {t['V_total_ms']:.3f} ms    "
                        f"{'Interlaced' if interlaced else 'Progressive'}"),
                  bg=BG, fg=YELLOW, font=("Monospace", 9)).pack(side="bottom", pady=(0,6))
 
@@ -1463,7 +1481,12 @@ class App(tk.Tk):
         x_sync = round((HBP + H + HFP) * sx)
         y_act  = round(VBP  * sy)
         y_vfp  = round((VBP + V)       * sy)
-        y_sync = round((VBP + V + VFP) * sy)
+
+        # Minimum 4px for small V zones
+        MIN     = 4
+        vfp_h   = max(round(VFP * sy), MIN)
+        vsync_h = max(round(VSYNC * sy), MIN)
+        y_sync  = min(y_vfp + vfp_h, CH - vsync_h)
 
         cv = tk.Canvas(top, width=CW, height=CH, bg="#111122",
                        highlightthickness=0)
@@ -1494,7 +1517,7 @@ class App(tk.Tk):
         cy_act = (y_act + y_vfp) // 2
 
         # V Back Porch label (top band)
-        clbl(cx_act, y_act // 2, f"V Back Porch  {VBP} lines  /  {t['VBP_ms']:.3f} ms",
+        clbl(cx_act, y_act // 2, f"V Back Porch  {VBP} px  /  {t['VBP_ms']:.3f} ms",
              "#ffffff", 9)
 
         # H Back Porch label (left strip)
@@ -1515,12 +1538,12 @@ class App(tk.Tk):
         # V Front Porch
         if y_sync - y_vfp > 12:
             clbl(cx_act, (y_vfp + y_sync) // 2,
-                 f"V Front Porch  {VFP} lines  /  {t['VFP_ms']:.3f} ms", "#ffffff", 8)
+                 f"V Front Porch  {VFP} px  /  {t['VFP_ms']:.3f} ms", "#ffffff", 8)
 
         # V Sync
         if CH - y_sync > 10:
             clbl(cx_act, (y_sync + CH) // 2,
-                 f"V Sync  {VSYNC} lines  /  {t['VSYNC_ms']:.3f} ms", "#333333", 8)
+                 f"V Sync  {VSYNC} px  /  {t['VSYNC_ms']:.3f} ms", "#333333", 8)
 
         # ── Info inside green active area ──────────────────────────────────────
         # Title
@@ -1533,39 +1556,48 @@ class App(tk.Tk):
              "#b0bec5", 9)
 
         # Two-column legend inside green area
-        lx_h = cx_act - 160   # H column x
-        lx_v = cx_act + 60    # V column x
-        ly   = cy_act - 30    # start y
-        dy   = 22             # row height
+        lx_h = cx_act - 160
+        lx_v = cx_act + 60
+        ly   = cy_act - 30
+        dy   = 22
+
+        X_DOT  =   0
+        X_LBL  =  16
+        X_NUM  = 110
+        X_TIME = 118
 
         # Column headers
-        clbl(lx_h, ly - 16, "─── Horizontal ───", ACCENT, 9, bold=True)
-        clbl(lx_v, ly - 16, "─── Vertical ───",   ACCENT, 9, bold=True)
+        clbl(lx_h + X_LBL, ly - 16, "── Horizontal ──", "#ffffff", 9, bold=True, anchor="w")
+        clbl(lx_v + X_LBL, ly - 16, "── Vertical ──",   "#ffffff", 9, bold=True, anchor="w")
 
         h_rows = [
-            (C_ACT,   f"H active    {H} px       {t['H_actif_us']:.3f} µs"),
-            (C_HBP,   f"H Back      {HBP} px      {t['HBP_us']:.3f} µs"),
-            (C_HFP,   f"H Front     {HFP} px       {t['HFP_us']:.3f} µs"),
-            (C_HSYNC, f"H Sync      {HSYNC} px       {t['HSYNC_us']:.3f} µs"),
-            (YELLOW,  f"H total     {H_total} px     {t['H_total_us']:.3f} µs"),
+            (C_ACT,   "H active", f"{H}",       f"{t['H_actif_us']:.3f} µs"),
+            (C_HBP,   "H Back",   f"{HBP}",     f"{t['HBP_us']:.3f} µs"),
+            (C_HFP,   "H Front",  f"{HFP}",     f"{t['HFP_us']:.3f} µs"),
+            (C_HSYNC, "H Sync",   f"{HSYNC}",   f"{t['HSYNC_us']:.3f} µs"),
+            (YELLOW,  "H total",  f"{H_total}", f"{t['H_total_us']:.3f} µs"),
         ]
         v_rows = [
-            (C_ACT,   f"V active    {V} lines   {t['V_actif_ms']:.3f} ms"),
-            (C_VBP,   f"V Back      {VBP} lines    {t['VBP_ms']:.3f} ms"),
-            (C_VFP,   f"V Front     {VFP} lines     {t['VFP_ms']:.3f} ms"),
-            (C_VSYNC, f"V Sync      {VSYNC} lines     {t['VSYNC_ms']:.3f} ms"),
-            (YELLOW,  f"V total     {V_total} lines   {t['V_total_ms']:.3f} ms"),
+            (C_ACT,   "V active", f"{V}",       f"{t['V_actif_ms']:.3f} ms"),
+            (C_VBP,   "V Back",   f"{VBP}",     f"{t['VBP_ms']:.3f} ms"),
+            (C_VFP,   "V Front",  f"{VFP}",     f"{t['VFP_ms']:.3f} ms"),
+            (C_VSYNC, "V Sync",   f"{VSYNC}",   f"{t['VSYNC_ms']:.3f} ms"),
+            (YELLOW,  "V total",  f"{V_total}", f"{t['V_total_ms']:.3f} ms"),
         ]
 
-        for i, (col, label) in enumerate(h_rows):
+        for i, (col, lbl, num, tim) in enumerate(h_rows):
             y = ly + i * dy
-            dot(lx_h - 110, y - 5, col)
-            clbl(lx_h, y, label, "#ffffff", 9, anchor="center")
+            dot(lx_h + X_DOT, y - 5, col)
+            clbl(lx_h + X_LBL,  y, lbl, "#ffffff", 9, anchor="w")
+            clbl(lx_h + X_NUM,  y, f"{num}px", "#ffffff", 9, anchor="e")
+            clbl(lx_h + X_TIME, y, tim, "#dddddd", 9, anchor="w")
 
-        for i, (col, label) in enumerate(v_rows):
+        for i, (col, lbl, num, tim) in enumerate(v_rows):
             y = ly + i * dy
-            dot(lx_v - 110, y - 5, col)
-            clbl(lx_v, y, label, "#ffffff", 9, anchor="center")
+            dot(lx_v + X_DOT, y - 5, col)
+            clbl(lx_v + X_LBL,  y, lbl, "#ffffff", 9, anchor="w")
+            clbl(lx_v + X_NUM,  y, f"{num}px", "#ffffff", 9, anchor="e")
+            clbl(lx_v + X_TIME, y, tim, "#dddddd", 9, anchor="w")
 
     def _save_crt_range(self):
         """Save the calculated CRT range (and modeline) to a named text file."""
