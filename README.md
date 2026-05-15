@@ -3,6 +3,8 @@
 
 A Python toolkit for calculating, verifying, importing and saving CRT modelines — with deep integration for Batocera Linux and SwitchRes.
 
+![CRT Modeline Toolbox GUI](docs/gui_main.png)
+
 ---
 
 ## Overview
