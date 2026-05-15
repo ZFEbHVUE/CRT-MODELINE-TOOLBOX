@@ -10,6 +10,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import subprocess
 import math
+import re
 
 # ==============================================================================
 # MONITOR PRESETS (source: Calamity/SwitchRes)
@@ -251,15 +252,25 @@ def fmt_crt_range(r, hfp, hs, hbp, vfp, vs, vbp):
             f"{vfp:.3f}, {vs:.3f}, {vbp:.3f}, "
             f"0, 0, {r['pLmin']}, {r['pLmax']}, {r['iLmin']}, {r['iLmax']}")
 
+def _safe_round(f):
+    """Round float to int, using ceil when near X.5 to avoid sync instability."""
+    frac = f % 1
+    return math.ceil(f) if 0.4 <= frac <= 0.6 else round(f)
+
 def calculate_from_range(H, V, Hfreq, Vfreq, interlaced, r):
     Div = 2 if interlaced else 1
     H_T = 1.0 / Hfreq;  V_T = 1.0 / Vfreq
     hfp_t = r["hfp"]*1e-6; hs_t = r["hs"]*1e-6; hbp_t = r["hbp"]*1e-6
     vfp_t = r["vfp"]*1e-3; vs_t = r["vs"]*1e-3; vbp_t = r["vbp"]*1e-3
-    TH    = H / (H_T*(1.0 - hfp_t/H_T - hs_t/H_T - hbp_t/H_T))
-    HFP   = round(hfp_t*TH); HSYNC = round(hs_t*TH);  HBP = round(hbp_t*TH)
-    TV    = V / (V_T*(1.0 - vfp_t/V_T - vs_t/V_T - vbp_t/V_T))
-    VFP   = round(vfp_t*TV); VSYNC = round(vs_t*TV);  VBP = round(vbp_t*TV)
+    denom_H = 1.0 - hfp_t/H_T - hs_t/H_T - hbp_t/H_T
+    denom_V = 1.0 - vfp_t/V_T - vs_t/V_T - vbp_t/V_T
+    TH = H / (H_T * denom_H)
+    TV = V / (V_T * denom_V)
+    def _sr(f): return _safe_round(f)
+    H_total = _sr(H / denom_H)
+    HFP=round(hfp_t*TH); HSYNC=round(hs_t*TH); HBP=H_total-H-HFP-HSYNC
+    V_total = _sr(V / denom_V)
+    VFP=round(vfp_t*TV); VSYNC=round(vs_t*TV); VBP=V_total-V-VFP-VSYNC
     X1,X2 = H, H+HFP;           X3,X4 = H+HFP+HSYNC, H+HFP+HSYNC+HBP
     Y1,Y2 = V, V+VFP;           Y3,Y4 = V+VFP+VSYNC, V+VFP+VSYNC+VBP
     return dict(X1=X1,X2=X2,X3=X3,X4=X4,Y1=Y1,Y2=Y2,Y3=Y3,Y4=Y4,
@@ -343,7 +354,7 @@ def optimize_modeline(H, V, Hfreq_target, Vfreq_target, interlaced, r):
     HFP_tgt=hfp_t*TERM_H; HS_tgt=hs_t*TERM_H; HBP_tgt=hbp_t*TERM_H
     HFP_min=max(1,math.floor(HFP_tgt*0.5)); HS_min=max(1,math.floor(HS_tgt*0.5))
     HBP_min=max(1,math.floor(HBP_tgt*0.5))
-    H_total=max(H+HFP_min+HS_min+HBP_min,round(H/denom_H) if denom_H>0 else H+50)
+    H_total=max(H+HFP_min+HS_min+HBP_min,_safe_round(H/denom_H) if denom_H>0 else H+50)
     HFP_tgt2=hfp_t*Hfreq*H_total; HS_tgt2=hs_t*Hfreq*H_total; HBP_tgt2=hbp_t*Hfreq*H_total
     HFP_min2=max(1,math.floor(HFP_tgt2*0.5)); HS_min2=max(1,math.floor(HS_tgt2*0.5))
     HBP_min2=max(1,math.floor(HBP_tgt2*0.5))
@@ -512,6 +523,15 @@ class App(tk.Tk):
         self.e_output.bind("<Return>",   lambda e: self._calc_gen())
         self.e_output.bind("<FocusOut>", lambda e: self._calc_gen())
 
+        tk.Label(frm_opt, text="Name", fg=FG2, bg=BG,
+                 font=FONT_S).pack(side="left", padx=(8,0))
+        self.e_name = tk.Entry(frm_opt, width=12, bg=BG2, fg=YELLOW,
+                                insertbackground=FG, font=FONT_M,
+                                relief="flat", bd=2)
+        self.e_name.pack(side="left", padx=4)
+        self.e_name.bind("<Return>",   lambda e: self._calc_gen())
+        self.e_name.bind("<FocusOut>", lambda e: self._calc_gen())
+
         tk.Frame(inner, bg=BG3, height=1).pack(fill="x", padx=4, pady=3)
 
         # Resolution + frequency sliders
@@ -534,10 +554,12 @@ class App(tk.Tk):
         tk.Frame(inner, bg=BG3, height=1).pack(fill="x", padx=4, pady=3)
 
         # Paste CRT Range
-        tk.Label(inner, text="Paste CRT Range", fg=ACCENT, bg=BG,
+        tk.Label(inner, text="Paste CRT Range / Import Modeline", fg=ACCENT, bg=BG,
                  font=FONT_B).pack(anchor="w", padx=6, pady=(0,2))
         frm_paste = tk.Frame(inner, bg=BG)
         frm_paste.pack(fill="x", padx=4, pady=2)
+        tk.Label(frm_paste, text="CRT Range:", fg=FG2, bg=BG,
+                 font=FONT_S, width=10).pack(side="left")
         self.e_crt_paste = tk.Entry(frm_paste, bg=BG2, fg=YELLOW,
                                      insertbackground=FG, font=FONT_M,
                                      relief="flat", bd=2)
@@ -545,6 +567,18 @@ class App(tk.Tk):
         self.e_crt_paste.bind("<Return>", lambda e: self._parse_crt_range())
         ttk.Button(frm_paste, text="Parse",
                    command=self._parse_crt_range).pack(side="left")
+
+        frm_imp = tk.Frame(inner, bg=BG)
+        frm_imp.pack(fill="x", padx=4, pady=2)
+        tk.Label(frm_imp, text="Modeline:", fg=FG2, bg=BG,
+                 font=FONT_S, width=10).pack(side="left")
+        self.e_import = tk.Entry(frm_imp, bg=BG2, fg=YELLOW,
+                                  insertbackground=FG, font=FONT_M,
+                                  relief="flat", bd=2)
+        self.e_import.pack(side="left", fill="x", expand=True, padx=(0,4))
+        self.e_import.bind("<Return>", lambda e: self._import_modeline())
+        ttk.Button(frm_imp, text="Import →",
+                   command=self._import_modeline).pack(side="left")
 
         tk.Frame(inner, bg=BG3, height=1).pack(fill="x", padx=4, pady=3)
 
@@ -659,12 +693,14 @@ class App(tk.Tk):
         frm_btn = tk.Frame(inner, bg=BG)
         frm_btn.pack(fill="x", padx=4, pady=4)
         for text, cmd in [
-            ("Copy",     self._copy_xrandr),
-            ("Apply",    self._apply_xrandr),
-            ("⚡ Opt LS", self._optimise_ls),
-            ("💾 Save",   self._save_crt_range),
-            ("📂 Load",   self._load_crt_range),
-            ("📺 Diagram",self._show_diagram),
+            ("Copy",       self._copy_xrandr),
+            ("Apply",      self._apply_xrandr),
+            ("⚡ Opt LS",  self._optimise_ls),
+            ("💾 Save CRT", self._save_crt_range),
+            ("📂 Load CRT", self._load_crt_range),
+            ("🎬 Save ML",  self._save_modeline),
+            ("📂 Load ML",  self._load_modeline),
+            ("📺 Diagram",  self._show_diagram),
         ]:
             ttk.Button(frm_btn, text=text, command=cmd).pack(
                 side="left", padx=2)
@@ -897,8 +933,8 @@ class App(tk.Tk):
         ]:
             self.tree_gen.insert("", "end", values=row)
 
-        hok=r_live["hmin"]<=Hf<=r_live["hmax"]
-        vok=r_live["vfmin"]<=res["Vfreq_actual"]<=r_live["vfmax"]
+        hok=r_live["hmin"]<=round(Hf)<=r_live["hmax"]
+        vok=r_live["vfmin"]<=round(res["Vfreq_actual"],2)<=r_live["vfmax"]
         if i:
             lok=r_live["iLmin"]<=V<=r_live["iLmax"] if r_live["iLmax"]>0 else False
             lstr=f"[{r_live['iLmin']}–{r_live['iLmax']}] interlaced"
@@ -919,14 +955,16 @@ class App(tk.Tk):
                        fmt_crt_range(r_live,t["HFP_us"],t["HSYNC_us"],t["HBP_us"],
                                      t["VFP_ms"],t["VSYNC_ms"],t["VBP_ms"]))
         istr=" interlace" if i else ""
-        H=res["X1"]; name=f"{H}x{V}{'i' if i else ''}"
+        H=res["X1"]; auto_name=f"{H}x{V}{'i' if i else ''}"
+        custom=self.e_name.get().strip()
+        name=custom if custom else auto_name
         ml=(f"{res['pclk']:.6f} {res['X1']} {res['X2']} {res['X3']} {res['X4']} "
             f"{res['Y1']} {res['Y2']} {res['Y3']} {res['Y4']}{istr} -hsync -vsync")
         self._set_text(self.txt_modeline, f'Modeline "{name}" {ml}')
         self._set_text(self.txt_xrandr,
-                       f'xrandr --newmode "{name}" {ml}\n'
-                       f'xrandr --addmode {out} "{name}"\n'
-                       f'xrandr --output {out} --mode "{name}"')
+                       f'xrandr --display :0.0 --newmode "{name}" {ml}\n'
+                       f'xrandr --display :0.0 --addmode {out} "{name}"\n'
+                       f'xrandr --display :0.0 --output {out} --mode "{name}"')
 
     def _calc_ver(self):
         raw=self.e_modeline_in.get().strip()
@@ -944,8 +982,8 @@ class App(tk.Tk):
                           ("lbl_v_vtot",str(res["Y4"])),
                           ("lbl_v_mode","Interlaced" if res["interlaced"] else "Progressive")]:
             getattr(self,attr).config(text=val)
-        hok=r["hmin"]<=res["Hfreq"]<=r["hmax"]
-        vok=r["vfmin"]<=res["Vfreq_actual"]<=r["vfmax"]
+        hok=r["hmin"]<=round(res["Hfreq"])<=r["hmax"]
+        vok=r["vfmin"]<=round(res["Vfreq_actual"],2)<=r["vfmax"]
         V=res["Y1"]; i=res["interlaced"]
         if i:
             lok=r["iLmin"]<=V<=r["iLmax"] if r["iLmax"]>0 else False
@@ -971,9 +1009,9 @@ class App(tk.Tk):
             f"{res['Y1']} {res['Y2']} {res['Y3']} {res['Y4']}{istr} -hsync -vsync")
         out=self.e_output_v.get() or "DP-1"
         self._set_text(self.txt_v_xrandr,
-                       f'xrandr --newmode "{ml_name}" {ml}\n'
-                       f'xrandr --addmode {out} "{ml_name}"\n'
-                       f'xrandr --output {out} --mode "{ml_name}"')
+                       f'xrandr --display :0.0 --newmode "{ml_name}" {ml}\n'
+                       f'xrandr --display :0.0 --addmode {out} "{ml_name}"\n'
+                       f'xrandr --display :0.0 --output {out} --mode "{ml_name}"')
 
     def _optimise_ls(self):
         try:
@@ -1015,6 +1053,85 @@ class App(tk.Tk):
             except Exception as e:
                 messagebox.showerror("xrandr error",str(e)); return
         messagebox.showinfo("xrandr","Modeline applied successfully.")
+
+    def _import_modeline(self):
+        raw = self.e_import.get().strip()
+        raw = re.sub(r'^[Mm]odeline\s+"[^"]*"\s*', '', raw).strip()
+        parts = raw.split()
+        if len(parts) < 9:
+            messagebox.showerror("Import", "Expected: pclk X1 X2 X3 X4 Y1 Y2 Y3 Y4 [interlace]")
+            return
+        try:
+            pclk=float(parts[0])
+            X1,X2,X3,X4=int(parts[1]),int(parts[2]),int(parts[3]),int(parts[4])
+            Y1,Y2,Y3,Y4=int(parts[5]),int(parts[6]),int(parts[7]),int(parts[8])
+        except ValueError as e:
+            messagebox.showerror("Import", str(e)); return
+        interlaced="interlace" in raw.lower(); Div=2 if interlaced else 1
+        Hf=pclk*1e6/X4; Vf=Hf*Div/Y4
+        HFP=X2-X1; HSYNC=X3-X2; HBP=X4-X3
+        VFP=Y2-Y1; VSYNC=Y3-Y2; VBP=Y4-Y3
+        self.sw_width.set_value(X1); self.sw_height.set_value(Y1)
+        self.sw_hfreq.set_value(round(Hf/1000,3)); self.sw_vfreq.set_value(round(Vf,3))
+        self.var_interlaced.set(1 if interlaced else 0)
+        self.sw_hfp_px.set_value(HFP); self.sw_hs_px.set_value(HSYNC)
+        self.sw_hbp_px.set_value(HBP); self.sw_vfp_px.set_value(VFP)
+        self.sw_vs_px.set_value(VSYNC); self.sw_vbp_px.set_value(VBP)
+        r=self._current_range or PRESETS["Arcade 15kHz"]["ranges"][0]
+        res=dict(X1=X1,X2=X2,X3=X3,X4=X4,Y1=Y1,Y2=Y2,Y3=Y3,Y4=Y4,
+                 HFP=HFP,HSYNC=HSYNC,HBP=HBP,VFP=VFP,VSYNC=VSYNC,VBP=VBP,
+                 pclk=pclk,Hfreq=Hf,Vfreq_actual=Vf,interlaced=interlaced)
+        t=calc_timings(res)
+        self.sw_hfp.set_value(round(t["HFP_us"],3)); self.sw_hs.set_value(round(t["HSYNC_us"],3))
+        self.sw_hbp.set_value(round(t["HBP_us"],3)); self.sw_vfp.set_value(round(t["VFP_ms"],3))
+        self.sw_vs.set_value(round(t["VSYNC_ms"],3)); self.sw_vbp.set_value(round(t["VBP_ms"],3))
+        r_live={"hfp":t["HFP_us"],"hs":t["HSYNC_us"],"hbp":t["HBP_us"],
+                "vfp":t["VFP_ms"],"vs":t["VSYNC_ms"],"vbp":t["VBP_ms"],
+                **{k:r[k] for k in ("hmin","hmax","vfmin","vfmax","pLmin","pLmax","iLmin","iLmax")}}
+        self._refresh_display(res, r_live)
+
+    def _save_modeline(self):
+        if not self._last_res:
+            messagebox.showwarning("Save", "Generate a modeline first."); return
+        res=self._last_res; i=res["interlaced"]
+        H=res["X1"]; V=res["Y1"]; istr=" interlace" if i else ""
+        auto=f"{H}x{V}{'i' if i else ''}"
+        name=self.e_name.get().strip() or auto
+        out=self.e_output.get().strip() or "DP-1"
+        ml=(f"{res['pclk']:.6f} {res['X1']} {res['X2']} {res['X3']} {res['X4']} "
+            f"{res['Y1']} {res['Y2']} {res['Y3']} {res['Y4']}{istr} -hsync -vsync")
+        content=(f"# Modeline: {name}\n"
+                 f"Modeline \"{name}\" {ml}\n"
+                 f"xrandr --display :0.0 --newmode \"{name}\" {ml}\n"
+                 f"xrandr --display :0.0 --addmode {out} \"{name}\"\n"
+                 f"xrandr --display :0.0 --output {out} --mode \"{name}\"\n")
+        fp=filedialog.asksaveasfilename(title="Save Modeline",defaultextension=".modeline",
+            filetypes=[("Modeline","*.modeline"),("Text","*.txt"),("All","*.*")],
+            initialfile=f"{name}.modeline")
+        if not fp: return
+        try:
+            with open(fp,"w",encoding="utf-8") as f: f.write(content)
+            messagebox.showinfo("Saved",f"Saved: {fp}")
+        except Exception as e: messagebox.showerror("Error",str(e))
+
+    def _load_modeline(self):
+        fp=filedialog.askopenfilename(title="Load Modeline",
+            filetypes=[("Modeline","*.modeline"),("Text","*.txt"),("All","*.*")])
+        if not fp: return
+        try:
+            lines=open(fp,"r",encoding="utf-8").readlines()
+        except Exception as e: messagebox.showerror("Error",str(e)); return
+        for line in lines:
+            s=line.strip()
+            if s.startswith("Modeline"):
+                m=re.match(r'Modeline\s+"([^"]+)"\s+(.*)',s)
+                if m:
+                    self.e_import.delete(0,"end")
+                    self.e_import.insert(0,m.group(2))
+                    self.e_name.delete(0,"end")
+                    self.e_name.insert(0,m.group(1))
+                    self._import_modeline(); return
+        messagebox.showerror("Error","No Modeline line found.")
 
     def _save_crt_range(self):
         self.txt_crt_calc.config(state="normal")
