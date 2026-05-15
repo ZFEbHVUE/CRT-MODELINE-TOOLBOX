@@ -840,7 +840,7 @@ class App(tk.Tk):
         self.e_crt_paste = tk.Entry(frm_crt_row, bg=BG2, fg=YELLOW,
                                      insertbackground=FG, font=FONT_M,
                                      relief="flat", bd=4)
-        self.e_crt_paste.insert(0, "crt_range0  15625-16200, 49.50-65.00, 2.000, 4.700, 8.000, 0.064, 0.192, 1.024, 0, 0, 192, 288, 448, 576")
+        self.e_crt_paste.insert(0, "")
         self.e_crt_paste.pack(side="left", fill="x", expand=True, padx=(0,4))
         self.e_crt_paste.bind("<Return>", lambda e: self._parse_crt_range())
         ttk.Button(frm_crt_row, text="Parse →",
@@ -854,7 +854,7 @@ class App(tk.Tk):
         self.e_import = tk.Entry(frm_imp_row, bg=BG2, fg=YELLOW,
                                   insertbackground=FG, font=FONT_M,
                                   relief="flat", bd=4)
-        self.e_import.insert(0, "12.162382 640 658 716 773 480 488 493 525 interlace -hsync -vsync")
+        self.e_import.insert(0, "")
         self.e_import.pack(side="left", fill="x", expand=True, padx=(0,4))
         self.e_import.bind("<Return>", lambda e: self._import_modeline())
         ttk.Button(frm_imp_row, text="Import →",

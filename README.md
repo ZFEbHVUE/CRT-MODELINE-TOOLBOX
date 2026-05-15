@@ -1,410 +1,305 @@
-# CRT Modeline Toolbox
+# CRT Modeline Toolbox v2.0
+**by Stéphane "ZFEbHVUE"**
 
-**Interactive calculation, verification and optimisation tool for CRT monitor modelines**
-
-*Stéphane "ZFEbHVUE" — v2.0*
-
----
-
-## GUI toolbox
-![CRT-MODELINE-TOOLBOX GUI](docs/gui_main.png)
+A Python toolkit for calculating, verifying, importing and saving CRT modelines — with deep integration for Batocera Linux and SwitchRes.
 
 ---
 
 ## Overview
 
-**CRT Modeline Toolbox** is a Python/Tkinter desktop application for generating, verifying and optimising video modelines destined for CRT monitors running at 15 kHz, 25 kHz or 31 kHz — the native frequencies of arcade monitors, PAL/NTSC television sets and retro gaming setups.
-
-It is designed to complement:
-- [SwitchRes](https://github.com/antonioginer/switchres) by **Calamity** (Antonio Giner) — the reference modeline calculator used by GroovyMAME and RetroArch
-- [Batocera-CRT-Script](https://github.com/ZFEbHVUE/Batocera-CRT-Script) — CRT support scripts for Batocera Linux
-
-The toolbox bridges the gap between the **time domain** (µs/ms porch values stored in `switchres.ini` `crt_range` lines) and the **pixel domain** (integer counts used in `xrandr --newmode` modeline strings), while making the rounding errors and physical constraints fully visible and interactive.
+CRT Modeline Toolbox v2.0 generates and verifies XFree86-format modelines for CRT monitors driven at 15 kHz (arcade/NTSC/PAL) in a Batocera/MAME retro-gaming context. It replicates and extends the Calamity monitor preset system used by SwitchRes, while exposing every intermediate value for analysis and debugging.
 
 ---
 
-## Background — what is a CRT modeline?
+## Files
 
-A modeline encodes the complete timing of the video signal sent to a CRT monitor. Every value has a precise physical meaning:
-
-```
-Modeline "768x576i" 15.578125  768 799 872 997  576 578 603 625  interlace -hsync -vsync
-                    │           │   │   │   │    │   │   │   │
-                    pixel_clock H1  H2  H3  H4   V1  V2  V3  V4
-```
-
-| Field | Meaning |
+| File | Description |
 |---|---|
-| `pixel_clock` | Dot clock in MHz — drives the DAC |
-| `H1` | Horizontal active resolution |
-| `H2` | H1 + H Front Porch |
-| `H3` | H2 + H Sync pulse |
-| `H4` | H3 + H Back Porch = **H total** |
-| `V1` | Vertical active resolution |
-| `V2` | V1 + V Front Porch |
-| `V3` | V2 + V Sync pulse |
-| `V4` | V3 + V Back Porch = **V total** |
-
-The key timing relationships are:
-
-```
-Hfreq  =  pixel_clock × 10⁶ / H_total                    (Hz)
-Vfreq  =  Hfreq / V_total              (progressive)
-Vfreq  =  Hfreq × 2 / V_total         (interlaced)
-
-H_total_time  =  1 / Hfreq            →  64.000 µs  for PAL 15.625 kHz
-V_total_time  =  1 / Vfreq            →  20.000 ms  for PAL 50 Hz (per field)
-```
-
-For PAL 15 kHz, the canonical values are:
-- **Hfreq = 15.625 kHz** → H_total time = **64.000 µs** exactly
-- **Vfreq = 50.000 Hz** → V_total time = **20.000 ms** per field exactly
-
----
-
-## Physical meaning of the blanking intervals
-
-Each porch and sync interval has a specific physical role in the CRT signal:
-
-| Interval | Physical role |
-|---|---|
-| **H Front Porch** | Time for the scan line circuits to settle before the sync pulse is detected |
-| **H Sync** | Pulse that triggers the horizontal oscillator reset in the chassis |
-| **H Back Porch** | Beam flyback time (right → left) + circuit stabilisation before visible image |
-| **V Front Porch** | Time after last visible line before the vertical sync pulse |
-| **V Sync** | Pulse that resets the vertical deflection oscillator |
-| **V Back Porch** | Beam flyback time (bottom → top) + stabilisation before first visible line |
-
-The **CRT_RANGE** values in `switchres.ini` define **minimum physical times** (in µs/ms) for each interval based on the monitor chassis characteristics. SwitchRes uses them as constraints, not exact targets — the actual pixel counts are scaled proportionally via TERM_H / TERM_V.
-
----
-
-## Why CRT Range values never round-trip exactly
-
-The CRT Range stores porch times as **continuous floating-point values** (µs/ms). Converting to pixel counts requires multiplication by TERM_H or TERM_V followed by integer rounding — an irreducible quantisation error:
-
-```
-HFrontPorch input  =  2.000 µs          (Calamity's crt_range)
-→ HFP pixels       =  round(2.000 × TERM_H)  =  31 px
-→ HFrontPorch back =  31 / 997 / 15625 × 10⁶  =  1.990 µs  ≠  2.000
-```
-
-The pixel is the atomic unit of the signal. This is why the toolbox always shows **two distinct CRT Range lines** — the Calamity reference (frozen at preset selection) and the values back-calculated from the generated modeline — so the quantisation error is immediately visible.
+| `crt_modeline_toolbox_v2.0.py` | Full desktop Tkinter GUI — for use on a normal PC screen |
+| `crt_modeline_toolbox_640x480_v2.0.py` | Compact Tkinter GUI — for use on a 640×480 CRT screen |
+| `crt_modeline_batocera.py` | Pure pygame version — for use inside Batocera Linux |
 
 ---
 
 ## Features
 
-### Generate tab
+### Modeline Generation
+- 10 Calamity monitor presets (NTSC, PAL, Arcade 15 kHz, Arcade 15ex, Arcade 25 kHz, Arcade 31 kHz, etc.)
+- Automatic calculation of H_total and V_total from timing values (µs/ms)
+- **Direct Porch Adjustment** — fine-tune HFP, HSYNC, HBP, VFP, VSYNC, VBP in pixels/lines
+- Full output: Modeline string + xrandr command (`--display :0.0`)
 
-#### Monitor / Range
-- Select from **23 monitor presets** (sourced from Calamity/SwitchRes built-in definitions)
-- Multi-range monitors (Arcade 15/25/31 kHz, Wells Gardner D9800 with 6 ranges, etc.) — select the active frequency range from the **Range** dropdown
-- Changing Hfreq auto-switches the range on multi-range presets
+### Optimiser (Largest-Remainder)
+- Finds the optimal V_total for a target Vfreq
+- Distributes blanking pixels using the largest-remainder method to avoid rounding drift
+- Reports `Vfreq error` in real time
 
-#### Paste CRT Range
-- Paste any `crt_range0` line directly from a `switchres.ini` or a saved file
-- Press **Enter** or **Parse → apply to sliders** to load all values into the sliders instantly
-- Accepts the full format with or without the `crt_range0` prefix
+### Import / Export
+- **Paste CRT Range** — paste a `crt_range0` line from switchres.ini, fills all sliders
+- **Import Modeline** — paste a raw XFree86 modeline, fills all sliders (H in px, V in px, H timings in µs, V timings in ms)
+- **Save CRT Range** — saves the full configuration (range + modeline + xrandr) to a `.crt` file
+- **Load CRT Range** — restores a saved configuration
+- **Save Modeline** — saves the modeline + xrandr commands to a `.modeline` file
+- **Load Modeline** — loads a `.modeline` file and fills all sliders
 
-#### Parameters (µs / ms domain)
-All values are editable via **slider + direct keyboard entry** — both stay synchronised:
-- **H Width** and **V Height** — active resolution in pixels
-- **Hfreq** — target horizontal frequency in kHz (auto-switches range on multi-range presets)
-- **Vfreq** — target vertical frequency in Hz
+### Verification
+- Checks Hfreq ∈ [hmin, hmax] and Vfreq ∈ [vfmin, vfmax]
+- Checks active lines ∈ [pLmin, pLmax] (progressive) or [iLmin, iLmax] (interlaced)
+- Displays the **CRT Range back-calculated from the generated modeline** (ready for switchres.ini)
+- Displays the **Calamity fixed preset values** for comparison
 
-#### CRT Range (µs / ms domain)
-Six sliders with direct keyboard entry for the porch and sync times:
-- **H Front Porch**, **H Sync**, **H Back Porch** in µs
-- **V Front Porch**, **V Sync**, **V Back Porch** in ms
-
-Changes trigger recalculation via the TERM_H / TERM_V proportional method — the same algorithm used by SwitchRes.
-
-#### Direct Porch Adjustment (px / lines)
-A dedicated frame with six additional sliders in the **integer pixel / line domain**:
-- **H Front Porch (px)**, **H Sync (px)**, **H Back Porch (px)**
-- **V Front Porch (lines)**, **V Sync (lines)**, **V Back Porch (lines)**
-
-When you adjust a pixel slider:
-- The modeline is recalculated directly from the pixel counts
-- The µs/ms sliders update automatically with the back-calculated times
-- This is particularly useful for directly setting VSync to a specific number of lines without computing the equivalent ms manually
-
-When you adjust a µs/ms slider:
-- The pixel sliders update automatically with the resulting pixel counts
-
-Both domains are always synchronised.
-
-#### CRT Range displays
-Two side-by-side read-only fields:
-- **Calamity values (fixed to preset)** — the original preset values, unchanged as long as the preset is not switched. Relabelled **Custom (pasted)** when a custom range is loaded via Paste
-- **Calculated from generated modeline** — the CRT Range back-calculated from the actual integer pixel counts, showing the quantisation error versus Calamity's reference
-
-#### Timings table
-Full breakdown of all horizontal and vertical intervals in both px/lines and µs/ms:
-
-| Parameter | px/lines | Time | Unit |
-|---|---|---|---|
-| H active | 768 | 49.300 | µs |
-| H Front Porch | 31 | 1.990 | µs |
-| H Sync | 73 | 4.686 | µs |
-| H Back Porch | 125 | 8.024 | µs |
-| **H total** | **997** | **64.000** | **µs** |
-| V active | 576 | 18.432 | ms |
-| V Front Porch | 2 | 0.064 | ms |
-| V Sync | 8 | 0.256 | ms |
-| V Back Porch | 39 | 1.248 | ms |
-| **V total** | **625** | **20.000** | **ms** |
-
-#### Metrics
-- Pixel clock (MHz), Hfreq (kHz), Vfreq (Hz)
-- H total (px), V total (lines), H blanking (px)
-
-#### Verification
-Three colour-coded checks against the selected monitor preset:
-- ✓ / ✗  Hfreq within [hmin–hmax] Hz
-- ✓ / ✗  Vfreq within [vfmin–vfmax] Hz
-- ✓ / ✗  V lines within progressive or interlaced limits
-
-#### Modeline and xrandr command
-Ready-to-use output in both formats:
-```
-Modeline "768x576i" 15.578125 768 799 872 997 576 578 603 625 interlace -hsync -vsync
-
-xrandr --newmode "768x576i" 15.578125 768 799 872 997 576 578 603 625 interlace -hsync -vsync
-xrandr --addmode DP-1 "768x576i"
-xrandr --output DP-1 --mode "768x576i"
-```
-
-#### Action buttons
-| Button | Action |
-|---|---|
-| **Copy xrandr** | Copies the three xrandr commands to the clipboard |
-| **Apply xrandr** | Executes the xrandr commands directly on the running system |
-| **⚡ Optimise (LS)** | Runs the least-squares optimiser (see below) |
-| **💾 Save CRT Range** | Saves the current result to a named text file |
-| **📂 Load CRT Range** | Opens a previously saved file and applies it to the sliders |
+### Signal Diagram
+- Visual representation of H blanking zones (HFP, HSYNC, HBP) and V blanking zones (VFP, VSYNC, VBP)
+- Color-coded, with legend aligned inside the active area
 
 ---
 
-### Verify tab
+## Technical Details
 
-Paste any modeline string (SwitchRes output or xrandr format) and instantly see:
-- Full timing decomposition in px/lines and µs/ms
-- Hfreq, Vfreq, pixel_clock computed from the raw numbers
-- Verification against the selected monitor preset (auto-selects the correct frequency range for multi-range monitors)
-- CRT Range back-calculated from the modeline — useful for generating a custom `crt_range` line for `switchres.ini`
-- Ready-to-use xrandr commands
+### Modeline Format
+
+```
+Modeline "name" pclk  Hact Hbeg Hend Htot  Vact Vbeg Vend Vtot  [interlace] [±hsync] [±vsync]
+
+pclk (MHz)  = Hfreq × H_total / 1,000,000
+Hfreq (Hz)  = pclk × 1,000,000 / H_total
+Vfreq (Hz)  = Hfreq × Div / V_total       (Div=2 interlaced, Div=1 progressive)
+```
+
+### _safe_round — Rounding Fix
+
+Python 3 uses banker's rounding: `round(772.5) = 772` (rounds to even). This causes H_total to be computed as 772 instead of 773 for some NTSC presets.
+
+The toolbox uses `_safe_round()` which applies `math.ceil()` when the fractional part falls in [0.4, 0.6]:
+
+```python
+def _safe_round(f):
+    frac = f % 1
+    return math.ceil(f) if 0.4 <= frac <= 0.6 else round(f)
+```
+
+Applied in both `calculate_from_range()` and `optimize_modeline()`.
+
+### HBP / VBP as Exact Remainder
+
+Individual rounding of HFP, HSYNC, HBP can cause their sum to differ from the intended H_total by ±1 pixel. The toolbox computes HBP (and VBP) as the exact remainder:
+
+```python
+H_total = _safe_round(H / denom_H)
+HFP     = round(hfp_t * TH)
+HSYNC   = round(hs_t  * TH)
+HBP     = H_total - H - HFP - HSYNC   # exact, no accumulated rounding error
+```
 
 ---
 
-## Least-squares optimiser (⚡ Optimise LS)
+## NTSC 480i — Root Cause Analysis
 
-The optimiser solves the problem of finding the **best integer modeline** for a given set of target frequencies.
+### The Problem
 
-### Why it is needed
-
-SwitchRes's TERM_H / TERM_V method produces good modelines for any given Vfreq, but the resulting Vfreq is determined by rounding V_total — it may not hit the target exactly. For example, PAL 50 Hz requires V_total = 625 exactly, which only works if Hfreq × 2 / 625 = 50.000 exactly — which is true only for Hfreq = 15.625 kHz.
-
-### Algorithm
-
-**Step 1 — Hfreq exact**
-The pixel clock is a continuous floating-point value, so Hfreq can always be achieved exactly:
+The Calamity NTSC preset:
 ```
-pixel_clock = Hfreq_target × H_total / 10⁶  (MHz, exact)
+crt_range0  15734-15735, 59.94-59.94, 1.500, 4.700, 4.700, 0.191, 0.191, 0.953,
+            0, 0, 192, 240, 448, 480
 ```
 
-**Step 2 — optimal integer V_total**
-V_total must be an integer. The algorithm searches ±10 lines around the ideal value:
+gives `H_total_float = 772.499...` — exactly on the 772/773 boundary. Both Python and SwitchRes (C++) round this to 772. The working pixel clock requires H_total = **773** → pclk = 12.162382 MHz. With H_total = 772 → pclk = 12.147 MHz → CRT/adapter cannot sync.
+
+### The Working Modeline
+
+Found empirically for ANX9832/RTD2166 adapters on a 15 kHz CRT:
 ```
-V_total_ideal = Hfreq_target × Div / Vfreq_target
-```
-and selects the integer that minimises `|Hfreq × Div / V_total − Vfreq_target|`.
-
-For PAL: V_total_ideal = 15625 × 2 / 50 = 625.000 → exact, Vfreq error = 0.000000 Hz.
-
-**Step 3 — TERM_V proportional targets**
-Rather than using raw minimum times as targets (which produces physically small porches), the optimiser uses the same **TERM_V proportional scaling** as SwitchRes to compute target pixel counts. This ensures the porch proportions remain physically meaningful.
-
-**Step 4 — largest-remainder distribution**
-The blanking pixels are distributed among the three components (FP, Sync, BP) using the **largest-remainder method** (also used in proportional electoral systems) — the integer rounding method that minimises the total squared error.
-
-### Result for 768×576i @ 15.625 kHz / 50 Hz
-
-```
-V Front Porch =  2 lines  (0.064 ms)  ← matches Calamity
-V Sync        =  8 lines  (0.256 ms)  ← slightly more than Calamity's 6 lines
-V Back Porch  = 39 lines  (1.248 ms)  ← proportional
-V total       = 625       (20.000 ms) ← PAL exact ✓
-Vfreq error   = 0.000000 Hz ✓
+12.162382 640 658 716 773 480 488 493 525 interlace -hsync -vsync
 ```
 
-### Physical caveat
+```
+HFP=18  HSYNC=58  HBP=57   H_total=773   Hfreq=15,734 Hz
+VFP=8   VSYNC=5   VBP=32   V_total=525   Vfreq=59.940 Hz
+pclk = 15734 × 773 / 1,000,000 = 12.162382 MHz
+```
 
-The optimiser targets are based on **Calamity's generic CRT_RANGE** values, which are conservative envelopes valid for a monitor category (e.g., all 15 kHz arcade monitors), not the exact physical requirements of a specific chassis. The optimal porch values for a given monitor can only be determined precisely by oscilloscope measurement or empirical testing. The optimiser guarantees mathematical correctness within the CRT_RANGE constraints — physical validation on the actual hardware is always recommended.
+### SwitchRes Source Analysis (modeline.cpp)
+
+Even with a correctly crafted crt_range, SwitchRes generates a different (unstable) modeline at 15705 Hz instead of 15734 Hz. Reading the SwitchRes source revealed the full cascade.
+
+#### Step 1 — interlace_incr = 0.5
+
+```cpp
+double interlace_incr = !cs->interlace_force_even && interlace == 2 ? 0.5 : 0;
+vvt_ini = total_lines_for_yres(...) + interlace_incr;  // 262 + 0.5 = 262.5
+t_mode->hfreq = t_mode->vfreq * vvt_ini;               // 59.829 × 262.5 = 15705 Hz
+```
+
+For interlaced modes with `interlace_force_even=0` (default), SwitchRes adds 0.5 to the field line count before computing Hfreq. This shifts Hfreq by ~30 Hz, explaining the 15705 Hz result.
+
+#### Step 2 — max_vfreq_for_yres — The Critical Threshold
+
+```cpp
+return range->hfreq_max / (yres / interlace + round_near(range->hfreq_max * vertical_blank));
+```
+
+With `hfreq_max=15735` and `vertical_blank = vfp+vs+vbp` (in seconds):
+
+```
+15735 × 0.001430 = 22.501 → round_near = 23 → max_vfreq = 15735/263 = 59.829 Hz ✗
+15735 × 0.001429 = 22.484 → round_near = 22 → max_vfreq = 15735/262 = 60.057 Hz ✓
+```
+
+Critical threshold: `vertical_blank < 22.5 / 15735 = 1.4298 ms`
+
+#### Step 3 — The Full Cascade
+
+```
+vfp+vs+vbp = 0.254+0.159+1.017 = 1.430 ms  →  round_near(22.501) = 23
+→ max_vfreq = 15735/263 = 59.829 Hz
+→ vfreq_real = min(59.94, 59.829) = 59.829 Hz
+→ vvt (field lines, integer) = 262
+→ vvt_ini = 262 + 0.5 = 262.5    (interlace_incr)
+→ hfreq = 59.829 × 262.5 = 15705 Hz   ← outside [15734–15735] !
+→ pclk = 773 × 15705 / 1,000,000 = 12.140 MHz   ← unstable
+```
+
+#### Step 4 — Why vbp rounds to 1.017 instead of 1.016
+
+The V timings are derived from integer line counts. The exact total is:
+
+```
+VFP=8, VSync=5, VBP=32 → 45 lines
+exact_total = 45 / (15734 × 2) = 1.429296 ms
+```
+
+But rounding each value independently to 3 decimal places:
+
+```
+vfp = 8/31468 × 1000 = 0.25421 → 0.254  (rounds up)
+vs  = 5/31468 × 1000 = 0.15888 → 0.159  (rounds up)
+vbp = 32/31468 × 1000 = 1.01684 → 1.017  (rounds up ← crosses threshold!)
+sum = 1.430 ms  >  threshold 1.4298 ms  ✗
+```
+
+The individual rounding errors accumulate and push the sum over the threshold.
+
+### The Fix
+
+Use `floor` for vbp to stay below the threshold:
+
+```
+vbp = 1.016 ms   (floor of 1.01684)
+sum = 0.254 + 0.159 + 1.016 = 1.429 ms  <  1.4298 ms  ✓
+```
+
+**Correct crt_range for NTSC 480i:**
+```
+crt_range0  15734-15735, 59.94-59.94, 1.480, 4.769, 4.688, 0.254, 0.159, 1.016,
+            0, 0, 192, 240, 448, 480
+```
+
+Result in SwitchRes:
+```
+max_vfreq = 15735/262 = 60.057 Hz
+vfreq_real = min(59.94, 60.057) = 59.94 Hz
+vvt_ini = 262 + 0.5 = 262.5
+hfreq = 59.94 × 262.5 = 15734.25 Hz  ✓  (inside [15734–15735])
+vtotal = 262.5 × 2 = 525             ✓
+pclk ≈ 12.162 MHz                    ✓
+```
+
+### SwitchRes Source Fix (PR candidate)
+
+In `modeline.cpp`, `total_lines_for_yres()`, line 430 — the `<` strict comparison prevents the while loop from executing when `vfreq × (vvt+1)` equals `hfreq_max` exactly (floating-point boundary):
+
+```cpp
+// Before (misses the boundary case)
+while ((vfreq * vvt < range->hfreq_min) && (vfreq * (vvt + 1) < range->hfreq_max)) vvt++;
+
+// After (inclusive upper bound)
+while ((vfreq * vvt < range->hfreq_min) && (vfreq * (vvt + 1) <= range->hfreq_max)) vvt++;
+```
 
 ---
 
-## DP custom (ZFEbHVUE) preset
+## Batocera Integration
 
-The `DP custom (ZFEbHVUE)` preset uses a **V Sync pulse of 0.480 ms** instead of Calamity's standard 0.192 ms. This was found empirically to be necessary for DisplayPort-to-VGA adapters based on the **Realtek RTD2166** chip (which integrates its oscillator into the die — no external crystal is visible on the PCB) when used with AMD GPU DisplayPort outputs for 768×576i PAL content.
+### Call Chain
 
-The standard 6-line V Sync pulse (~0.192 ms) is too short for these adapters to reliably detect and lock the vertical sync signal. Extending it to 0.480 ms resolves the issue.
-
-Note that the RTD2166's integrated oscillator means its reference frequency is fixed inside the silicon — adapters built around this chip may behave differently from apparently identical units due to silicon revision differences or manufacturing variations, even when sharing the same part number.
-
----
-
-## Monitor presets
-
-All presets are sourced from Calamity's official SwitchRes monitor definitions.
-
-| Preset | Frequency ranges |
-|---|---|
-| PAL TV | 15 kHz fixed |
-| NTSC TV | 15 kHz fixed |
-| Generic 15 kHz | 15 kHz |
-| Arcade 15 kHz | 15 kHz |
-| Arcade 15 kHz EX | 15 kHz |
-| Arcade 25 kHz | 25 kHz |
-| Arcade 31 kHz | 31 kHz |
-| Arcade 15/25 kHz | 15 kHz + 25 kHz |
-| Arcade 15/31 kHz | 15 kHz + 31 kHz |
-| Arcade 15/25/31 kHz | 15 kHz + 25 kHz + 31 kHz |
-| Wells Gardner D9800/D9400 | 15 / 18 / 25 / 31 / 33 / 36 kHz |
-| Wells Gardner D9200 | 15 / 24 / 31 / 37 kHz |
-| Wells Gardner K7000 | 15 kHz |
-| Wells Gardner 25K7131 | 15 kHz |
-| Nanao MS-2930/2931 | 15 / 24 / 31 kHz |
-| Nanao MS9-29 | 15 / 24 kHz |
-| Hantarex MTC 9110 / Polo | 15 kHz |
-| Hantarex Polostar 25 | 15 / 16 / 25 / 31 kHz |
-| Makvision 2929D | 31 kHz |
-| Wei-Ya M3129 | 15 / 24 / 31 kHz |
-| Rodotron 666B-29 | 15 / 24 / 31 kHz |
-| PC CRT 31 kHz/120 Hz | 31 kHz/60 Hz + 31 kHz/120 Hz |
-| PC CRT 70 kHz/120 Hz | 70 kHz/60 Hz + 70 kHz/120 Hz |
-| **DP custom (ZFEbHVUE)** | 15 kHz PAL — extended V Sync for DP2VGA |
-
----
-
-## Save and Load CRT Range
-
-The **💾 Save CRT Range** button saves the current result to a named text file containing:
-- Monitor name and active range
-- Resolution, Hfreq, Vfreq
-- Calamity reference CRT Range (for comparison)
-- Calculated CRT Range (from the generated modeline)
-- Modeline string
-- xrandr commands
-
-Example saved file:
 ```
-# CRT Modeline Toolbox — ZFEbHVUE
-# Monitor  : Arcade 15kHz  [15KHz]
-# Resolution: 768x576i  Hfreq=15.625 kHz  Vfreq=50.000 Hz  Interlaced=Yes
-
-# --- Calamity preset (reference) ---
-crt_range0  15625-16200, 49.50-65.00, 2.000, 4.700, 8.000, 0.064, 0.192, 1.024, 0, 0, 192, 288, 448, 576
-
-# --- Calculated from generated modeline ---
-crt_range0  15625-16200, 49.50-65.00, 1.990, 4.686, 8.024, 0.064, 0.256, 1.248, 0, 0, 192, 288, 448, 576
-
-# --- Modeline ---
-Modeline "768x576i" 15.578125 768 799 872 997 576 578 603 625 interlace -hsync -vsync
-
-# --- xrandr commands ---
-xrandr --newmode "768x576i" 15.578125 768 799 872 997 576 578 603 625 interlace -hsync -vsync
-xrandr --addmode DP-1 "768x576i"
-xrandr --output DP-1 --mode "768x576i"
+emulationstation-standalone
+  └─ batocera-resolution defineMode <res>
+  │     └─ switchres → computes modeline → xrandr --newmode / --addmode
+  └─ batocera-resolution setMode_CVT <res>
+        └─ if <res> in videomodes.conf → xrandr --mode  (bypass SwitchRes)
+           else → xrandr --mode from defineMode result
 ```
 
-The **📂 Load CRT Range** button opens a previously saved file, automatically finds the **calculated** `crt_range0` line (not the Calamity reference), and applies it to all sliders — exactly as if you had pasted it manually.
+### Bypass SwitchRes for NTSC 480i
 
-On GNOME/Ubuntu, the file dialogs use the native GTK dialog (via `zenity`) which supports folder creation. On other systems it falls back to Tkinter's built-in dialog.
+SwitchRes cannot reliably reproduce the exact working modeline due to the issues described above. The solution is to pre-load the known-good modeline at startup. When `defineMode` subsequently tries `xrandr --newmode "640x480" [switchres_modeline]`, it fails silently because the name already exists, and the correct modeline stays in place.
 
----
-
-## Installation
-
-### Requirements
-
-- Python 3.8 or later
-- Tkinter (included in the Python standard library)
-- `zenity` (optional — for native GTK file dialogs with folder creation on GNOME/Ubuntu)
-
+**`/userdata/system/custom.sh`**
 ```bash
-# Ubuntu / Debian
-sudo apt install python3-tk zenity
-
-# Clone and run
-git clone https://github.com/ZFEbHVUE/CRT-MODELINE-TOOLBOX
-cd CRT-MODELINE-TOOLBOX
-python3 crt_modeline_toolbox_en.py
+xrandr --display :0.0 --newmode "640x480" 12.162382 640 658 716 773 480 488 493 525 interlace -hsync -vsync
+xrandr --display :0.0 --addmode DP-1 "640x480"
 ```
 
-No pip dependencies — the toolbox uses only Python standard library modules (`tkinter`, `subprocess`, `math`).
+**`/userdata/system/videomodes.conf`**
+```
+640x480.59.94
+```
+
+`setMode_CVT` finds `640x480.59.94` in videomodes.conf and applies the pre-loaded modeline directly via `xrandr --output DP-1 --mode "640x480" --rate "59.94"`. SwitchRes is bypassed entirely for this mode.
+
+### switchres.ini — Duplicate crt_range0 Pitfall
+
+If switchres.ini contains two `crt_range0` lines:
+```ini
+crt_range0  15734-15735, ...   ← your custom range
+crt_range0  auto               ← overwrites the previous!
+```
+
+The second entry silently overwrites the first. SwitchRes only sees `auto` and ignores the custom range. Remove all duplicate `crt_rangeN` entries.
 
 ---
 
-## Usage guide
+## Hardware Tested
 
-### Generating a modeline
+| Adapter | 240p 15 kHz progressive | 480i 15 kHz interlaced |
+|---|---|---|
+| ANX9832 (DP→VGA) | ✓ stable | ✓ stable (exact modeline required) |
+| RTD2166 (DP→VGA) | ✓ stable | ✓ stable (exact modeline required) |
 
-1. Select your **Monitor** from the dropdown
-2. For multi-range monitors, select the active frequency band from **Range**
-3. Set **H Width**, **V Height**, **Hfreq**, **Vfreq** using sliders or keyboard
-4. Tick **Interlaced** for 576i / 480i modes
-5. Adjust **CRT Range µs/ms** sliders if needed, or use **Direct Porch Adjustment px/lines** for integer control
-6. Click **⚡ Optimise (LS)** to find the best integer distribution for exact Hfreq/Vfreq targets
-7. Read the **Modeline** and **xrandr command** in the results panel
-8. Use **Copy xrandr** or **Apply xrandr** to use the modeline
-9. Optionally **💾 Save CRT Range** to keep the result for later
+GPU: AMD Radeon R9 380 (Dell T5500) — DP-1 for CRT, HDMI-1 for LCD marquee.
 
-### Using a custom CRT Range
+---
 
-Paste a `crt_range0` line (from `switchres.ini`, a saved file, or Calamity's documentation) into the **Paste CRT Range** field and press Enter or the Parse button. All sliders will update immediately.
+## Usage
 
-### Verifying an existing modeline
-
-1. Switch to the **Verify** tab
-2. Paste your modeline — e.g. the output of `switchres 768 576 50 -m arcade_15 -c`
-3. Select the target monitor preset
-4. All timings, frequencies and limit checks are displayed instantly
-5. The calculated CRT Range can be used in a custom `crt_range` line for `switchres.ini`
-
-### Comparing SwitchRes output with the toolbox
-
+### Desktop version
 ```bash
-# Get SwitchRes modeline
-switchres 768 576 50 -m arcade_15 -c
-# → Modeline "768x576_50i 15.675000KHz 50.000000Hz" 15.627975 768 799 872 997 576 583 589 627 interlace -hsync -vsync
+python3 crt_modeline_toolbox_v2.0.py
 ```
 
-Paste this into the Verify tab with the Arcade 15 kHz preset — the toolbox will show the full timing decomposition and confirm that V Sync = 6 lines (0.192 ms) at 15.675 kHz, which may be too short for some DP2VGA adapters.
+1. Select **Monitor** preset and **Range**
+2. Set **H Width**, **V Height**, **Hfreq**, **Vfreq**, **Interlaced** toggle
+3. Paste a `crt_range0` line or adjust sliders manually
+4. Fine-tune porches in **Direct Porch Adjustment**
+5. Click **⚡ Optimise (LS)** to find optimal V_total
+6. **Copy xrandr** or **Apply xrandr** to use the modeline
+7. **🎬 Save Modeline** to save for later reuse
+
+### Import an existing modeline
+Paste a raw modeline in the **Modeline:** field and click **Import →**. All sliders are filled automatically. The conversion uses `calc_timings()` which correctly divides by H_total and V_total — avoiding the wrong conversion that previously inflated µs values by a factor of ~773.
+
+### Derive crt_range from a working modeline
+After importing, the **CRT Range — calculated from generated modeline** box shows the back-calculated `crt_range0` ready for switchres.ini. Apply the **vbp floor rule**: use `math.floor(vbp_exact × 1000) / 1000` to ensure the total V blanking stays below the 1.4298 ms threshold.
 
 ---
 
-## Related projects
+## Repository
 
-| Project | Description |
-|---|---|
-| [Batocera-CRT-Script](https://github.com/ZFEbHVUE/Batocera-CRT-Script) | CRT support scripts for Batocera Linux — primary project |
-| [SwitchRes](https://github.com/antonioginer/switchres) | Reference modeline calculator by Calamity |
-| [GroovyMAME](https://github.com/antonioginer/GroovyMAME) | MAME fork with native SwitchRes integration |
-| [GroovyArcade](https://github.com/substring/GroovyArcade) | Arch Linux distro for CRT arcade cabinets |
-
----
-
-## Acknowledgements
-
-- **Calamity (Antonio Giner)** — for SwitchRes and the complete monitor preset database
-- **Epsylon** (neo-arcadia.com) — for the foundational technical documentation on Master Clocks, pixel clocks and 240p modelines, system by system
-- **Substring (Gil)** — for GroovyArcade, the patched Linux kernel enabling KMS mode switching, and many technical discussions on the CRT scene
-- **Rion (Daniel Rion)** — for the CRT expertise and contributions to Batocera-CRT-Script
+https://github.com/ZFEbHVUE/CRT-MODELINE-TOOLBOX
 
 ---
 
 ## License
 
-MIT
+GPL-2.0+
