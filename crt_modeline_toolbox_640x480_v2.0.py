@@ -349,6 +349,13 @@ def optimize_modeline(H, V, Hfreq_target, Vfreq_target, interlaced, r):
     VFP_min2=max(1,math.floor(VFP_tgt*0.5)); VS_min2=max(1,math.floor(VS_tgt*0.5))
     VBP_min2=max(1,math.floor(VBP_tgt*0.5))
     VFP,VSYNC,VBP=distribute_ls(best_V-V,[VFP_tgt,VS_tgt,VBP_tgt],[VFP_min2,VS_min2,VBP_min2])
+    # SwitchRes threshold check
+    hmax=r["hmax"]; threshold_ms=22500.0/hmax
+    line_ms=1000.0/(Hfreq*Div)
+    vblank_ms=(VFP+VSYNC+VBP)*line_ms
+    switchres_ok=vblank_ms<threshold_ms
+    if not switchres_ok and VBP>VBP_min2:
+        VBP-=1; vblank_ms=(VFP+VSYNC+VBP)*line_ms; switchres_ok=vblank_ms<threshold_ms
     H_T=1.0/Hfreq; denom_H=1.0-hfp_t/H_T-hs_t/H_T-hbp_t/H_T
     TERM_H=H/(H_T*denom_H) if denom_H>0 else H*1.15
     HFP_tgt=hfp_t*TERM_H; HS_tgt=hs_t*TERM_H; HBP_tgt=hbp_t*TERM_H
@@ -365,7 +372,8 @@ def optimize_modeline(H, V, Hfreq_target, Vfreq_target, interlaced, r):
                 HFP=HFP,HSYNC=HSYNC,HBP=HBP,VFP=VFP,VSYNC=VSYNC,VBP=VBP,
                 pclk=Hfreq*X4/1e6,Hfreq=Hfreq,Vfreq_actual=Vfreq_actual,
                 interlaced=interlaced,
-                Vfreq_error=abs(Vfreq_actual-Vfreq_target),Hfreq_error=0.0)
+                Vfreq_error=abs(Vfreq_actual-Vfreq_target),Hfreq_error=0.0,
+                switchres_ok=switchres_ok,vblank_ms=vblank_ms,threshold_ms=threshold_ms)
 
 # ==============================================================================
 # COMPACT APPLICATION — 640×480
@@ -689,24 +697,41 @@ class App(tk.Tk):
         self.txt_xrandr = self._text_ro(frm_xr, height=3)
         self.txt_xrandr.pack(fill="x", padx=4, pady=3)
 
-        # Buttons
+        # Buttons — row 1: xrandr + optimiser + Lock VFP
         frm_btn = tk.Frame(inner, bg=BG)
-        frm_btn.pack(fill="x", padx=4, pady=4)
+        frm_btn.pack(fill="x", padx=4, pady=(4,0))
+
+        frm_btn1 = tk.Frame(frm_btn, bg=BG)
+        frm_btn1.pack(fill="x", pady=(0,2))
         for text, cmd in [
-            ("Copy",       self._copy_xrandr),
-            ("Apply",      self._apply_xrandr),
-            ("⚡ Opt LS",  self._optimise_ls),
+            ("Copy",      self._copy_xrandr),
+            ("Apply",     self._apply_xrandr),
+            ("⚡ Opt LS", self._optimise_ls),
+        ]:
+            ttk.Button(frm_btn1, text=text, command=cmd).pack(side="left", padx=2)
+        self.var_vfp_lock = tk.IntVar(value=0)
+        ttk.Checkbutton(frm_btn1, text="Lock VFP", variable=self.var_vfp_lock).pack(
+            side="left", padx=(6,2))
+        self.spn_vfp_lock = tk.Spinbox(frm_btn1, from_=1, to=30, width=3,
+                                        bg=BG2, fg=YELLOW, insertbackground=FG,
+                                        buttonbackground=BG2, relief="flat", font=FONT_S)
+        self.spn_vfp_lock.delete(0,"end"); self.spn_vfp_lock.insert(0,"3")
+        self.spn_vfp_lock.pack(side="left", padx=(0,2))
+        tk.Label(frm_btn1, text="l", fg=FG2, bg=BG, font=FONT_S).pack(side="left", padx=(0,6))
+        self.lbl_ls_error = tk.Label(frm_btn1, text="", fg=YELLOW, bg=BG, font=FONT_S)
+        self.lbl_ls_error.pack(side="left", padx=2)
+
+        # Row 2 — save/load + diagram
+        frm_btn2 = tk.Frame(frm_btn, bg=BG)
+        frm_btn2.pack(fill="x", pady=(0,2))
+        for text, cmd in [
             ("💾 Save CRT", self._save_crt_range),
             ("📂 Load CRT", self._load_crt_range),
             ("🎬 Save ML",  self._save_modeline),
             ("📂 Load ML",  self._load_modeline),
             ("📺 Diagram",  self._show_diagram),
         ]:
-            ttk.Button(frm_btn, text=text, command=cmd).pack(
-                side="left", padx=2)
-
-        self.lbl_ls_error = tk.Label(frm_btn, text="", fg=YELLOW, bg=BG, font=FONT_S)
-        self.lbl_ls_error.pack(side="left", padx=4)
+            ttk.Button(frm_btn2, text=text, command=cmd).pack(side="left", padx=2)
 
     # ==========================================================================
     # TAB 4 — VERIFY
@@ -1025,6 +1050,24 @@ class App(tk.Tk):
                     **{k:r[k] for k in ("hmin","hmax","vfmin","vfmax","pLmin","pLmax","iLmin","iLmax")}}
         except Exception: return
         res=optimize_modeline(H,V,Hf,Vf,i,r_live)
+        # VFP lock
+        if self.var_vfp_lock.get():
+            try: vfp_target=int(self.spn_vfp_lock.get())
+            except ValueError: vfp_target=None
+            if vfp_target and vfp_target!=res["VFP"]:
+                diff=res["VFP"]-vfp_target
+                new_vfp=vfp_target; new_vbp=res["VBP"]+diff
+                if new_vbp>=1 and new_vfp>=1:
+                    res["VFP"]=new_vfp; res["VBP"]=new_vbp
+                    res["Y2"]=res["Y1"]+new_vfp
+                    res["Y3"]=res["Y2"]+res["VSYNC"]
+                    res["Y4"]=res["Y3"]+new_vbp
+                    Div_r=2 if i else 1
+                    line_ms=1000.0/(res["Hfreq"]*Div_r)
+                    thr_ms=22500.0/r_live["hmax"]
+                    vb_ms=(new_vfp+res["VSYNC"]+new_vbp)*line_ms
+                    res["switchres_ok"]=vb_ms<thr_ms
+                    res["vblank_ms"]=vb_ms; res["threshold_ms"]=thr_ms
         t=calc_timings(res)
         self.sw_hfp.set_value(round(t["HFP_us"],3)); self.sw_hs.set_value(round(t["HSYNC_us"],3))
         self.sw_hbp.set_value(round(t["HBP_us"],3)); self.sw_vfp.set_value(round(t["VFP_ms"],3))
@@ -1033,9 +1076,12 @@ class App(tk.Tk):
         self.sw_hbp_px.set_value(res["HBP"]); self.sw_vfp_px.set_value(res["VFP"])
         self.sw_vs_px.set_value(res["VSYNC"]); self.sw_vbp_px.set_value(res["VBP"])
         ve=res["Vfreq_error"]
+        sr_ok=res.get("switchres_ok",True)
+        vb_ms=res.get("vblank_ms",0); thr_ms=res.get("threshold_ms",0)
+        sr_txt=f"  SR:{vb_ms:.3f}/{thr_ms:.3f}{'✓' if sr_ok else '✗'}"
         self.lbl_ls_error.config(
-            text=f"Vfreq err: {ve:.6f} Hz {'✓' if ve<1e-6 else ''}",
-            fg=GREEN if ve<1e-6 else YELLOW)
+            text=f"Vfreq:{ve:.6f}{'✓' if ve<1e-6 else ''}{sr_txt}",
+            fg=GREEN if (ve<1e-6 and sr_ok) else YELLOW)
         self._refresh_display(res, r_live)
 
     def _copy_xrandr(self):
