@@ -1,4 +1,4 @@
-# CRT Modeline Toolbox v2.0
+# CRT Modeline Toolbox v2.5
 **by Stéphane "ZFEbHVUE"**
 
 A Python toolkit for calculating, verifying, importing and saving CRT modelines — with deep integration for Batocera Linux and SwitchRes.
@@ -9,9 +9,13 @@ A Python toolkit for calculating, verifying, importing and saving CRT modelines 
 
 ## Overview
 
-CRT Modeline Toolbox v2.0 generates and verifies XFree86-format modelines for CRT monitors driven at 15 kHz (arcade/NTSC/PAL) in a Batocera/MAME retro-gaming context. It replicates and extends the Calamity monitor preset system used by SwitchRes, while exposing every intermediate value for analysis and debugging.
+CRT Modeline Toolbox v2.5 generates and verifies XFree86-format modelines for CRT monitors driven at 15 kHz (arcade/NTSC/PAL) in a Batocera/MAME retro-gaming context. It replicates and extends the Calamity monitor preset system used by SwitchRes, while exposing every intermediate value for analysis and debugging.
 
-The toolbox was developed and validated on **Batocera Linux** with an **AMD Radeon R7 380X** (GCN 3rd gen), outputting via DisplayPort to DP→VGA adapters (ANX9832 and RTD2166 chipsets) connected to a 15 kHz CRT.
+The toolbox was developed and validated on **Batocera Linux** with:
+- **AMD Radeon R7 380X** (GCN 3rd gen) — Dell T5500
+- **AMD Radeon RX 6400 XT** (RDNA 2)
+
+Output via DisplayPort → DP→VGA adapters (ANX9832 and RTD2166 chipsets) connected to 15 kHz CRT monitors.
 
 ---
 
@@ -31,31 +35,40 @@ The toolbox was developed and validated on **Batocera Linux** with an **AMD Rade
 - 10 Calamity monitor presets (NTSC, PAL, Arcade 15 kHz, Arcade 15ex, Arcade 25 kHz, Arcade 31 kHz, etc.)
 - Automatic calculation of H_total and V_total from timing values (µs/ms)
 - **Direct Porch Adjustment** — fine-tune HFP, HSYNC, HBP, VFP, VSYNC, VBP in pixels/lines
-- Full output: Modeline string + xrandr command (`--display :0.0`)
 
 ### Optimiser (Largest-Remainder)
 - Finds the optimal V_total for a target Vfreq
 - Distributes blanking pixels using the largest-remainder method
-- **Lock VFP** checkbox — forces a specific VFP line count and redistributes the excess to VBP (essential for hardware with VFP constraints, see below)
-- SwitchRes threshold indicator: shows `SR V-blank: X.XXX/X.XXX ms ✓/✗` in real time
+- **Δ VFP** control — adjust the V Front Porch relative to the optimised value:
+  - Positive value → absolute target (e.g. `8` sets VFP=8 lines exactly)
+  - Negative value → relative offset (e.g. `-5` reduces VFP by 5 lines)
+  - Essential for hardware with VFP constraints (see GPU section below)
+- **SwitchRes threshold indicator** — shows `SR V-blank: X.XXX/X.XXX ms ✓/✗` in real time
 - Automatic VBP reduction if the V blanking total exceeds the SwitchRes threshold
 
+### Geometry (SwitchRes `-g h_size:h_shift:v_shift`)
+- **H move (px) = H_shift** — shift image horizontally (modifies X2/X3, H_total unchanged)
+- **V move (lines) = V_shift** — shift image vertically (modifies Y2/Y3, V_total unchanged)
+  - Auto re-optimisation if VFP or VBP would go below 1 line
+- **H_size** — horizontal zoom: scales H blanking → changes H_total and pclk
+- **V_size ⚗** — vertical zoom (experimental): scales total V blanking proportionally
+- All geometry applied from the base modeline in real time — no accumulation
+- SwitchRes `-g` command generated automatically in the xrandr block
+
 ### Import / Export
-- **Paste CRT Range** — paste a `crt_range0` line from switchres.ini, fills all sliders
-- **Import Modeline** — paste a raw XFree86 modeline, fills all sliders (H in px, V in px, H timings in µs, V timings in ms)
-- **Save CRT Range** — saves the full configuration to a `.crt` file
-- **Load CRT Range** — restores a saved configuration
-- **Save Modeline** — saves the modeline + xrandr commands to a `.modeline` file
-- **Load Modeline** — loads a `.modeline` file and fills all sliders
+- **Paste CRT Range** — paste a `crt_range0` line, fills all sliders
+- **Import Modeline** — paste a raw XFree86 modeline, fills all sliders
+- **Save / Load CRT Range** — `.crt` file (full configuration)
+- **Save / Load Modeline** — `.modeline` file (modeline + xrandr commands)
 
 ### Verification
 - Checks Hfreq ∈ [hmin, hmax] and Vfreq ∈ [vfmin, vfmax]
-- Checks active lines ∈ [pLmin, pLmax] (progressive) or [iLmin, iLmax] (interlaced)
-- Displays the **CRT Range back-calculated from the generated modeline** (ready for switchres.ini)
-- Displays the **Calamity fixed preset values** for comparison
+- Checks active lines ∈ [pLmin, pLmax] or [iLmin, iLmax]
+- Displays **CRT Range back-calculated from generated modeline** (ready for switchres.ini)
+- Displays **Calamity fixed preset values** for comparison
 
 ### Signal Diagram
-- Visual representation of H and V blanking zones, color-coded with legend
+- Visual representation of H and V blanking zones, color-coded
 
 ---
 
@@ -71,11 +84,20 @@ Hfreq (Hz)  = pclk × 1,000,000 / H_total
 Vfreq (Hz)  = Hfreq × Div / V_total       (Div=2 interlaced, Div=1 progressive)
 ```
 
-### _safe_round — H_total Rounding Fix
+### V timing — relationship with Hfreq
 
-Python 3 uses banker's rounding: `round(772.5) = 772` (rounds to even). For some NTSC presets this causes H_total=772 instead of the correct 773, producing a wrong pixel clock.
+Each V line = 1 complete H period. For interlaced (Div=2):
 
-The toolbox uses `_safe_round()` which applies `math.ceil()` when the fractional part falls in [0.4, 0.6]:
+```
+VFP_ms = VFP_lines / (Hfreq × 2) × 1000
+
+NTSC 480i at 15734 Hz:  1 line = 1/(15734×2) × 1000 = 0.0318 ms
+PAL  576i at 15625 Hz:  1 line = 1/(15625×2) × 1000 = 0.0320 ms
+```
+
+### _safe_round — H_total rounding fix
+
+Python 3 banker's rounding: `round(772.5) = 772`. For some NTSC presets this causes H_total=772 instead of 773.
 
 ```python
 def _safe_round(f):
@@ -83,34 +105,147 @@ def _safe_round(f):
     return math.ceil(f) if 0.4 <= frac <= 0.6 else round(f)
 ```
 
-Applied in both `calculate_from_range()` and `optimize_modeline()`.
-
-### HBP / VBP as Exact Remainder
-
-Individual rounding of HFP, HSYNC, HBP can cause their sum to differ from H_total by ±1 pixel. The toolbox always computes HBP (and VBP) as the exact remainder, eliminating accumulated rounding error:
+### HBP / VBP as exact remainder
 
 ```python
 H_total = _safe_round(H / denom_H)
 HFP     = round(hfp_t * TH)
 HSYNC   = round(hs_t  * TH)
-HBP     = H_total - H - HFP - HSYNC
-```
-
-### vbp Floor in fmt_crt_range
-
-When back-calculating a crt_range from a modeline, vbp is floored (not rounded) to avoid crossing the SwitchRes threshold (see below):
-
-```python
-vbp_floor = math.floor(vbp * 1000) / 1000
+HBP     = H_total - H - HFP - HSYNC   # exact, no accumulated rounding error
 ```
 
 ---
 
-## NTSC 480i — Root Cause Analysis
+## SwitchRes Threshold — Critical Analysis
 
-### Context
+### The threshold
 
-The goal is to get SwitchRes to generate a stable 640×480i NTSC modeline on Batocera with an AMD R7 380X + DP→VGA adapter. The working empirical modeline found by trial and error is:
+SwitchRes (`modeline.cpp`, `max_vfreq_for_yres`):
+
+```cpp
+return hfreq_max / (yres / interlace + round_near(hfreq_max * vertical_blank));
+```
+
+When `round_near(hfreq_max × vertical_blank) ≥ X.5`, SwitchRes rounds up, reducing `max_vfreq` below the target and generating Hfreq ~30 Hz outside the specified range.
+
+```
+hfreq_max × (vfp+vs+vbp) < 22.5   →  correct Hfreq  ✓
+hfreq_max × (vfp+vs+vbp) ≥ 22.5   →  Hfreq drops ~30 Hz  ✗
+```
+
+**Critical threshold: `vfp+vs+vbp < 22.5 / hfreq_max` seconds**
+
+For NTSC at hmax=15735: `< 1.4298 ms`  
+For PAL at hmax=15750: `< 1.4286 ms`
+
+In lines (interlaced): `total V blanking < 22.5 × 2 = 45 lines` (NTSC)
+
+### The SwitchRes 15705 Hz bug
+
+With NTSC Calamity preset (1.500+4.700+4.700 = 10.900 µs H blank):
+```
+H_total_float = 640 / (1 - 10.900/63.549) = 772.499...
+```
+
+Python `round(772.499) = 772` (banker's rounding to even). `_safe_round` gives 773 ✓.
+
+SwitchRes generates Hfreq=**15705 Hz** (outside [15734–15735]) due to `interlace_incr=0.5`:
+```cpp
+vvt_ini = total_lines_for_yres(...) + 0.5;  // 262 + 0.5 = 262.5
+hfreq   = vfreq_real × vvt_ini;             // 59.829 × 262.5 = 15705 Hz
+```
+
+The root cause: individual rounding of vfp/vs/vbp to 3 decimal places pushes the total over the 1.4298 ms threshold:
+```
+vbp_exact  = 32 / 31468 × 1000 = 1.01684 ms
+round(...)                      = 1.017 ms  ← crosses threshold!
+floor(... × 1000) / 1000        = 1.016 ms  ← stays below ✓
+```
+
+The toolbox applies `_safe_round` in both `calculate_from_range()` and `optimize_modeline()`.
+
+---
+
+## GPU Hardware Constraints
+
+### VFP minimum per GPU
+
+Testing on Batocera Linux with DP→VGA adapters on CRT:
+
+| GPU | Min VFP (interlaced) | Notes |
+|---|---|---|
+| R7 380X (GCN 3) | **3 lines** | Works at 15 kHz with ANX9832/RTD2166 |
+| RX 6400 XT (RDNA 2) | **8 lines** | Standard AMD driver, no CRT Emudriver |
+
+This GPU-level constraint is consistent across both ANX9832 and RTD2166 adapters, confirming it is a GPU display engine limitation rather than an adapter issue.
+
+The `interlace_force_even` parameter in SwitchRes exists specifically for AMD GPU compatibility on Linux.
+
+### pclk minimum
+
+The RX 6400 XT with standard drivers refuses dotclocks below ~16 MHz for 15 kHz interlaced modes. Always verify that the generated pclk is within an acceptable range:
+
+```
+R7 380X : accepts pclk ≈ 12 MHz (e.g. 640×480i NTSC)
+RX 6400 XT : requires pclk ≥ ~16 MHz for stable output
+```
+
+### Using Δ VFP
+
+To find the minimum working VFP for your hardware:
+1. Tick **Δ VFP**, set value to `1`
+2. Click **⚡ Optimise (LS)**
+3. Apply xrandr → stable? → done. If not, increment by 1 and repeat.
+4. Once found, **Save Modeline** or **Save CRT Range**
+
+For R7 380X: start at `3`. For RX 6400 XT: start at `8`.
+
+---
+
+## Geometry — H_size / V_size / H_move / V_move
+
+### H_move and V_move
+
+Direct porch manipulation, keeps H_total and V_total unchanged:
+
+```
+H_move = +N  →  X2-=N, X3-=N  (image shifts right)
+H_move = -N  →  X2+=N, X3+=N  (image shifts left)
+V_move = +N  →  Y2-=N, Y3-=N  (image shifts down)
+V_move = -N  →  Y2+=N, Y3+=N  (image shifts up)
+```
+
+These values are identical to SwitchRes `h_shift` and `v_shift` in the `-g` parameter.
+
+**V_move limit**: VFP is typically small (3–8 lines). Moving down more than VFP−1 lines is impossible without re-optimisation. The toolbox automatically re-optimises with increased VFP target when the requested move exceeds available VFP.
+
+**Important**: for CRT TV overscan compensation, prefer adjusting `--screenoffset` in ES (`es.arg.override`) rather than V_move, to avoid mode-dependent position loss on game exit.
+
+### H_size
+
+Scales H blanking proportionally, keeping H_active and Hfreq fixed:
+
+```
+h_size=1.05  →  H_blank / 1.05  →  H_total decreases  →  pclk decreases
+             →  image appears 5% wider (beam traces same pixels in less time)
+```
+
+### V_size (experimental ⚗)
+
+Scales total V blanking proportionally, keeps V_active and VSync fixed:
+
+```
+v_size=1.1  →  V_blank / 1.1  →  V_total decreases  →  Vfreq increases slightly
+            →  image appears 10% taller
+```
+
+Note: for NTSC 480i with 45 total blanking lines and tight Vfreq range [59.94–59.94], the margin for V_size is very limited.
+
+---
+
+## NTSC 480i — Working Configuration
+
+### Working modeline (R7 380X, ANX9832/RTD2166)
 
 ```
 12.162382 640 658 716 773 480 488 493 525 interlace -hsync -vsync
@@ -118,129 +253,17 @@ The goal is to get SwitchRes to generate a stable 640×480i NTSC modeline on Bat
   VFP=8   VSYNC=5   VBP=32   V_total=525   Vfreq=59.940 Hz
 ```
 
-### Problem 1 — H_total=772 vs 773
-
-The Calamity NTSC preset gives `H_total_float = 772.499` — exactly on the 772/773 boundary. Both Python and SwitchRes (C++) round this to 772. With H_total=772, pclk=12.147 MHz → CRT/adapter cannot sync.
-
-**Fix:** `_safe_round()` uses `math.ceil()` for ambiguous cases, giving H_total=773 → pclk=12.162 MHz ✓
-
-### Problem 2 — SwitchRes Generates Hfreq=15705 Hz
-
-Even with a correct crt_range, SwitchRes generates Hfreq=15705 Hz (outside [15734–15735]) instead of 15734 Hz. Reading the SwitchRes source (`modeline.cpp`) revealed the full cascade.
-
-#### interlace_incr = 0.5
-
-For interlaced modes with `interlace_force_even=0` (default), SwitchRes adds 0.5 to the field line count:
-
-```cpp
-double interlace_incr = !cs->interlace_force_even && interlace == 2 ? 0.5 : 0;
-vvt_ini = total_lines_for_yres(...) + interlace_incr;  // 262 + 0.5 = 262.5
-t_mode->hfreq = t_mode->vfreq * vvt_ini;               // 59.829 × 262.5 = 15705 Hz !
-```
-
-#### max_vfreq_for_yres — The Critical Threshold
-
-```cpp
-return range->hfreq_max / (yres / interlace + round_near(range->hfreq_max * vertical_blank));
-```
-
-With `hfreq_max=15735` and `vertical_blank = vfp+vs+vbp` (in seconds):
+### Working crt_range for SwitchRes (custom monitor)
 
 ```
-15735 × 0.001430 = 22.501 → round_near = 23 → max_vfreq = 15735/263 = 59.829 Hz  ✗
-15735 × 0.001429 = 22.484 → round_near = 22 → max_vfreq = 15735/262 = 60.057 Hz  ✓
+crt_range0  15734-15735, 59.94-59.94, 1.480, 4.769, 4.688, 0.095, 0.222, 1.112, 0, 0, 192, 240, 448, 480
 ```
 
-**Critical threshold: `vfp+vs+vbp < 22.5 / hfreq_max × 1000 ms`**
+Note: `vfp=0.095 ms` (3 lines) is much smaller than Calamity standard (0.191 ms). This was found empirically — the R7 380X requires a short VFP for stable interlaced sync on this hardware combination.
 
-For NTSC: `< 22.5/15735 × 1000 = 1.4298 ms`
+### Batocera bypass (pre-load modeline)
 
-#### The Full Cascade
-
-```
-vfp+vs+vbp = 0.254+0.159+1.017 = 1.430 ms  →  round_near(22.501) = 23
-→ max_vfreq = 15735/263 = 59.829 Hz
-→ vfreq_real = min(59.94, 59.829) = 59.829 Hz
-→ vvt_ini = 262 + 0.5 = 262.5
-→ hfreq = 59.829 × 262.5 = 15705 Hz   ← outside [15734–15735] !
-→ pclk = 773 × 15705 / 1,000,000 = 12.140 MHz   ← unstable
-```
-
-#### Why vbp rounds to 1.017 instead of 1.016
-
-The exact V blanking for 45 lines at 15734 Hz is:
-
-```
-exact = 45 / (15734 × 2) = 1.429296 ms
-```
-
-But rounding each timing independently to 3 decimal places:
-
-```
-vfp = 8/31468 × 1000 = 0.254  (rounds up)
-vs  = 5/31468 × 1000 = 0.159  (rounds up)
-vbp = 32/31468 × 1000 = 1.01684 → 1.017  ← rounds up, crosses threshold!
-sum = 1.430 ms  >  1.4298 ms  ✗
-```
-
-**Fix:** use `floor` for vbp: `1.016 ms`. Sum = 1.429 ms < threshold ✓
-
-### Problem 3 — VFP Distribution and GPU Constraints (AMD R7 380X)
-
-Even with the correct H_total=773, V_total=525, and threshold satisfied, the VFP (V Front Porch) line count matters critically. Tests on a **AMD R7 380X** under Batocera with ANX9832 and RTD2166 DP→VGA adapters showed:
-
-- VFP = 7 lines (0.222 ms) → image unstable on both adapters
-- VFP = 3 lines (0.095 ms) → **stable image on both adapters** ✓
-
-This behaviour is consistent across both adapters, pointing to a **GPU-level constraint** rather than an adapter issue. AMD GCN display engines have known timing constraints for low-resolution interlaced output on standard (non-CRT-Emudriver) drivers. The `interlace_force_even` flag in SwitchRes exists specifically for AMD APU/GPU hardware on Linux.
-
-The working crt_range found empirically:
-
-```
-crt_range0  15734-15735, 59.94-59.94, 1.480, 4.768, 4.686, 0.095, 0.222, 1.112, 0, 0, 192, 240, 448, 480
-```
-
-Verification:
-```
-vfp+vs+vbp = 0.095+0.222+1.112 = 1.429 ms < 1.4298 ms ✓
-VFP  = round(0.095 × 31468/1000) =  3 lines
-VSync= round(0.222 × 31468/1000) =  7 lines
-VBP  = round(1.112 × 31468/1000) = 35 lines
-Total = 45 lines → V_total = 525 ✓
-```
-
-The VFP boundary values for reference (at Hfreq≈15734 Hz interlaced):
-
-| VFP lines | vfp max (ms) |
-|---|---|
-| 1 | 0.032 |
-| 2 | 0.064 |
-| **3 (works)** | **0.111** |
-| 4 | 0.143 |
-| 5 | 0.175 |
-| 6 | 0.207 |
-| 7 (fails) | 0.238 |
-
-To find the correct VFP for your hardware, use the **Lock VFP** feature in the optimizer and test values starting from 1 upward until the image is stable.
-
----
-
-## Batocera Integration
-
-### Call Chain
-
-```
-emulationstation-standalone
-  └─ batocera-resolution defineMode <res>
-  │     └─ switchres → computes modeline → xrandr --newmode / --addmode
-  └─ batocera-resolution setMode_CVT <res>
-        └─ if <res> in videomodes.conf → xrandr --mode  (bypass SwitchRes)
-           else → apply modeline from defineMode
-```
-
-### Bypass SwitchRes for NTSC 480i
-
-For critical modes where SwitchRes cannot reliably reproduce the exact modeline, pre-load the known-good modeline at startup. When `defineMode` tries `xrandr --newmode "640x480" [switchres_modeline]`, it fails silently because the name already exists, and the correct modeline stays in place.
+Since SwitchRes cannot reliably reproduce the exact working modeline, pre-load it at startup:
 
 **`/userdata/system/custom.sh`**
 ```bash
@@ -253,50 +276,66 @@ xrandr --display :0.0 --addmode DP-1 "640x480"
 640x480.59.94
 ```
 
-`setMode_CVT` finds `640x480.59.94` in videomodes.conf and applies the pre-loaded modeline directly via `xrandr --output DP-1 --mode "640x480" --rate "59.94"`. SwitchRes is bypassed entirely for this mode.
+`setMode_CVT` finds `640x480.59.94` in videomodes.conf and applies the pre-loaded modeline directly, bypassing SwitchRes.
 
-### switchres.ini — Common Pitfalls
+---
 
-**Duplicate crt_range0** — the second entry silently overwrites the first:
+## switchres.ini Common Pitfalls
+
+### Duplicate crt_range0
+
 ```ini
-crt_range0  15734-15735, ...   ← your custom range
+crt_range0  15734-15735, ...   ← custom range
 crt_range0  auto               ← silently overwrites the above!
 ```
 
-Remove all duplicate `crt_rangeN` entries. Verify with:
+Remove all duplicate `crt_rangeN auto` entries. Check with:
 ```bash
 grep "crt_range0" /etc/switchres.ini
 ```
+
+### crt_range for games vs ES resolution
+
+Never use a crt_range derived from a geometry-adjusted ES modeline for MAME/game resolutions. The large H blanking values produce excessive pclk for low resolutions:
+
+```
+Custom H_blank = 14 µs  →  H_total(320px) = 412  →  pclk = 6.5 MHz  ← black screen!
+Standard H_blank = 8 µs →  H_total(320px) = 348  →  pclk = 5.5 MHz  ← ok
+```
+
+Use the **standard Arcade 15kHz Calamity range** for MAME and apply geometry only to the ES resolution via `custom.sh`.
 
 ---
 
 ## SwitchRes Source Fix (PR candidate)
 
-In `modeline.cpp`, `total_lines_for_yres()` — the `<` strict comparison prevents the while loop from executing when `vfreq × (vvt+1)` equals `hfreq_max` exactly (floating-point boundary condition):
+In `modeline.cpp`, `total_lines_for_yres()`:
 
 ```cpp
-// Before
+// Before — misses boundary case (floating-point equality)
 while ((vfreq * vvt < range->hfreq_min) && (vfreq * (vvt + 1) < range->hfreq_max)) vvt++;
 
 // After
 while ((vfreq * vvt < range->hfreq_min) && (vfreq * (vvt + 1) <= range->hfreq_max)) vvt++;
 ```
 
-**Note:** this fix alone is not sufficient and can produce V_total=527 instead of 525 when combined with `interlace_incr=0.5`. The crt_range threshold fix (vbp floor) must be applied first. The complete fix for the NTSC preset would also require adjusting H_total rounding in `get_line_params`.
+**Note:** this fix alone may cause V_total=527 instead of 525 for NTSC. The crt_range vbp floor fix (keeping total < 1.4298 ms) must be applied alongside.
 
 ---
 
 ## Hardware Tested
 
-| Configuration | 240p 15 kHz progressive | 480i 15 kHz interlaced |
-|---|---|---|
-| R7 380X + ANX9832 (DP→VGA) | ✓ stable | ✓ stable with VFP=3 lines |
-| R7 380X + RTD2166 (DP→VGA) | ✓ stable | ✓ stable with VFP=3 lines |
+| Configuration | 240p 15 kHz | 480i NTSC | 576i PAL |
+|---|---|---|---|
+| R7 380X + ANX9832 | ✓ | ✓ VFP≥3 | ✓ |
+| R7 380X + RTD2166 | ✓ | ✓ VFP≥3 | ✓ |
+| RX 6400 XT + ANX9832 | ✓ | ✓ VFP≥8 | ✓ VFP≥8 |
+| RX 6400 XT + RTD2166 | ✓ | ✓ VFP≥8 | ✓ VFP≥8 |
 
-**GPU:** AMD Radeon R7 380X (Dell T5500) — Batocera Linux, standard AMD driver (no CRT Emudriver)
-**Output:** DP-1 for CRT, HDMI-1 for LCD marquee
+**Platform:** Batocera Linux, standard AMD driver (no CRT Emudriver)  
+**Output:** DP-1 for CRT, HDMI-1 for LCD marquee  
 
-> Note: CRT Emudriver would likely relax the VFP constraints observed on standard AMD drivers.
+> CRT Emudriver would likely relax the VFP and pclk constraints observed with standard AMD drivers.
 
 ---
 
@@ -308,23 +347,33 @@ python3 crt_modeline_toolbox_v2.0.py
 ```
 
 1. Select **Monitor** preset and **Range**
-2. Set **H Width**, **V Height**, **Hfreq**, **Vfreq**, **Interlaced** toggle
-3. Paste a `crt_range0` line or adjust sliders manually
-4. Fine-tune porches in **Direct Porch Adjustment**
-5. Click **⚡ Optimise (LS)** to find optimal V_total
-6. For hardware with VFP constraints (AMD GCN): tick **Lock VFP** and set the target line count (start with 3), then optimise
-7. Check the **SR V-blank** indicator — must show ✓ for SwitchRes compatibility
-8. **Copy xrandr** or **Apply xrandr** to test the modeline
-9. **🎬 Save Modeline** to save for later reuse
+2. Set resolution, Hfreq, Vfreq, Interlaced
+3. Click **⚡ Optimise (LS)**
+4. Set **Δ VFP** if needed for your GPU (R7 380X: 3, RX 6400 XT: 8)
+5. Adjust **Geometry** (H_move/V_move) to center the image on screen
+6. Check **SR V-blank ✓** indicator
+7. **Copy xrandr** to test, **Save Modeline** to keep
 
-### Finding the right VFP for your hardware
-1. Check **Lock VFP**, set value to **1**
-2. Click **⚡ Optimise (LS)**
-3. Apply xrandr → if image is stable, done; if not, increment VFP by 1 and repeat
-4. Once the stable value is found, **Save CRT Range** for SwitchRes
+### Finding the working VFP for your hardware
 
-### Import an existing modeline
-Paste a raw modeline in the **Modeline:** field and click **Import →**. All sliders are filled automatically using `calc_timings()` which correctly divides timing values by H_total/V_total — avoiding the inflated µs values caused by a missing division.
+1. Tick **Δ VFP**, start at `1`
+2. **⚡ Optimise** → **Apply xrandr** → stable? → done
+3. If black screen: increment by 1, repeat
+4. Note the minimum value for your GPU
+
+### Centering image on TV (overscan compensation)
+
+Use `es.arg.override` in Batocera for ES content positioning (survives game launches):
+
+```
+# /userdata/system/es.arg.override
+screensizeoffset_x  -40
+screensizeoffset_y  -40
+screenoffset_x  20
+screenoffset_y  25
+```
+
+For image position on the physical screen, adjust **V_move** in the modeline — this is a hardware-level fix that persists across all ES states.
 
 ---
 
