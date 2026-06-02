@@ -1,7 +1,7 @@
 # CRT Modeline Toolbox v2.5
 **by Stéphane "ZFEbHVUE"**
 
-A Python toolkit for calculating, verifying, importing and saving CRT modelines — with deep integration for Batocera Linux and SwitchRes.
+A Python toolkit for calculating, verifying, importing and saving CRT modelines — with deep integration for Linux.
 
 ![CRT Modeline Toolbox GUI](docs/gui_main.png)
 
