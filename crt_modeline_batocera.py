@@ -856,35 +856,57 @@ WATCHDOG_SCRIPT = "/tmp/crt_watchdog.py"
 # It reads the state file; if 'pending' and the deadline passes with no heartbeat
 # refresh, it reverts to the known-good mode.
 _WATCHDOG_SRC = r"""
-import json, os, time, subprocess, sys
+import json, os, time, subprocess
 STATE = "/tmp/crt_live_revert.json"
+LOG   = "/tmp/crt_watchdog.log"
+def log(msg):
+    try:
+        with open(LOG,"a") as f: f.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
+    except: pass
 def xrandr(args):
     env=dict(os.environ); env.setdefault("DISPLAY",":0.0")
-    try: subprocess.run(["xrandr"]+args,env=env,
-                        stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=8)
-    except: pass
+    try:
+        r=subprocess.run(["xrandr"]+args,env=env,
+                         stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=8)
+        log("xrandr "+" ".join(args)+f"  rc={r.returncode}")
+        return r.returncode==0
+    except Exception as e:
+        log("xrandr ERROR "+str(e)); return False
 def revert(st):
-    out=st.get("output","default"); kg=st.get("known_good_name")
-    kg_ml=st.get("known_good_modeline")
-    if kg:
-        xrandr(["--output",out,"--mode",kg])
+    out=st.get("output","default")
+    kg=st.get("known_good_name"); kg_ml=st.get("known_good_modeline")
+    log(f"REVERT output={out} name={kg} ml={'yes' if kg_ml else 'no'}")
+    done=False
+    # 1) revert by recreating the full known-good modeline (most reliable)
     if kg_ml:
-        nm=st.get("known_good_tmp","CRT_KNOWNGOOD")
-        xrandr(["--newmode",nm]+kg_ml.split())
+        nm="CRT_KNOWNGOOD"
+        xrandr(["--newmode",nm]+kg_ml.split())   # may already exist, ignore
         xrandr(["--addmode",out,nm])
-        xrandr(["--output",out,"--mode",nm])
+        if xrandr(["--output",out,"--mode",nm]): done=True
+    # 2) revert by mode name
+    if not done and kg:
+        if xrandr(["--output",out,"--mode",kg]): done=True
+    # 3) last resort: let xrandr pick the preferred mode
+    if not done:
+        xrandr(["--output",out,"--auto"])
+    log("revert done="+str(done))
+log("watchdog started")
 while True:
     try:
-        if not os.path.exists(STATE): break
+        if not os.path.exists(STATE):
+            log("state file gone, exit"); break
         st=json.load(open(STATE))
-        if st.get("state")=="off": break
-        if st.get("state")=="pending":
-            if time.time()>=st.get("deadline",0):
-                revert(st)
-                st["state"]="reverted"
-                json.dump(st,open(STATE,"w"))
-                break
-    except: pass
+        s=st.get("state")
+        if s=="off":
+            log("state off, exit"); break
+        if s=="pending" and time.time()>=st.get("deadline",0):
+            log("deadline reached, reverting")
+            revert(st)
+            st["state"]="reverted"
+            json.dump(st,open(STATE,"w"))
+            break
+    except Exception as e:
+        log("loop error "+str(e))
     time.sleep(0.4)
 """
 
@@ -900,30 +922,60 @@ class XrandrLiveBackend:
 
     # ── current mode capture ────────────────────────────────────────────────
     def capture_known_good(self):
-        """Read the current active mode name (and modeline if available)."""
+        """Capture current active mode NAME and full MODELINE for safe revert."""
+        self.known_good_name=None; self.known_good_modeline=None
+        # 1) Plain xrandr → active mode name (token on the line with '*')
         try:
             out=subprocess.check_output(
+                ["xrandr","--display",os.environ.get("DISPLAY",":0.0")],
+                stderr=subprocess.DEVNULL).decode()
+            cur_out=None
+            for line in out.split("\n"):
+                mc=re.match(r'^(\S+)\s+connected',line)
+                if mc: cur_out=mc.group(1)
+                if '*' in line:
+                    mt=re.match(r'^\s+(\S+)',line)
+                    if mt and (cur_out==self.output or self.known_good_name is None):
+                        self.known_good_name=mt.group(1)
+        except Exception: pass
+        # 2) xrandr --verbose → full modeline of the active mode
+        try:
+            v=subprocess.check_output(
                 ["xrandr","--display",os.environ.get("DISPLAY",":0.0"),"--verbose"],
                 stderr=subprocess.DEVNULL).decode()
-        except:
-            out=""
-        cur_out=None; self.known_good_name=None
-        for line in out.split("\n"):
-            m=re.match(r'^(\S+)\s+connected',line)
-            if m: cur_out=m.group(1)
-            # active mode line ends with '*current'
-            m2=re.search(r'^\s+(\d+x\d+\S*)\s.*\*',line)
-            if m2 and cur_out==self.output:
-                self.known_good_name=m2.group(1)
-        if not self.known_good_name:
-            # fallback: first '*' anywhere
-            m=re.search(r'^\s+(\S+)\s.*\*',out,re.MULTILINE)
-            if m: self.known_good_name=m.group(1)
+            self.known_good_modeline=self._extract_active_modeline(v)
+        except Exception: pass
         return self.known_good_name
+
+    @staticmethod
+    def _extract_active_modeline(verbose_out):
+        """Parse `xrandr --verbose` to rebuild the active mode's modeline string."""
+        lines=verbose_out.split("\n")
+        for i,line in enumerate(lines):
+            if '*current' in line:
+                # mode header: "  768x576 (0x...) 30.000MHz ..."
+                mh=re.search(r'([\d.]+)MHz',line)
+                if not mh: continue
+                pclk=float(mh.group(1))
+                interlaced='Interlace' in line
+                htot=vtot=None; hs=he=vs=ve=None; hd=vd=None
+                # following lines: "  h: width  768 start  ... end ... total ..."
+                for j in range(i+1,min(i+4,len(lines))):
+                    hl=re.search(r'h:\s+width\s+(\d+)\s+start\s+(\d+)\s+end\s+(\d+)\s+total\s+(\d+)',lines[j])
+                    vl=re.search(r'v:\s+height\s+(\d+)\s+start\s+(\d+)\s+end\s+(\d+)\s+total\s+(\d+)',lines[j])
+                    if hl: hd,hs,he,htot=map(int,hl.groups())
+                    if vl: vd,vs,ve,vtot=map(int,vl.groups())
+                if None not in (htot,vtot,hd,vd):
+                    il=" interlace" if interlaced else ""
+                    return (f"{pclk:.6f} {hd} {hs} {he} {htot} "
+                            f"{vd} {vs} {ve} {vtot}{il} -hsync -vsync")
+        return None
 
     # ── watchdog ────────────────────────────────────────────────────────────
     def start_watchdog(self):
         try:
+            try: os.remove("/tmp/crt_watchdog.log")
+            except: pass
             with open(WATCHDOG_SCRIPT,"w") as f: f.write(_WATCHDOG_SRC)
             self._write_state("idle", 0)
             self.watchdog=subprocess.Popen(
@@ -973,7 +1025,7 @@ class XrandrLiveBackend:
         subprocess.run(["xrandr"]+args,env=env,check=True,
                        stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=8)
 
-    def apply_live(self, modeline_str, countdown_s=15):
+    def apply_live(self, modeline_str, countdown_s=10):
         """Create + apply a temp mode, arm the revert deadline. Returns mode name."""
         self.counter+=1
         name=f"CRT_LIVE_{self.counter:03d}"
@@ -1445,8 +1497,13 @@ class App:
             self._live=XrandrLiveBackend(out)
             kg=self._live.capture_known_good()
             self._live.start_watchdog()
-            self.status=f"🔴 Realtime ON — known-good: {kg or '?'} (edit to apply)"
-            self.status_col=YELLOW
+            has_ml="+ml" if self._live.known_good_modeline else "no-ml"
+            if kg:
+                self.status=f"🔴 Realtime ON — known-good: {kg} ({has_ml}) on {out}"
+                self.status_col=YELLOW
+            else:
+                self.status=f"⚠ Realtime ON but known-good NOT captured on {out}! revert may fail"
+                self.status_col=RED_C
         else:
             if self._live:
                 self._live.revert_now(); self._live.stop_watchdog()
@@ -1468,11 +1525,11 @@ class App:
         if not ok:
             self.status=f"⛔ Blocked: {reason}"; self.status_col=RED_C; return
         ml=self._modeline_str()
-        name,err=self._live.apply_live(ml, countdown_s=15)
+        name,err=self._live.apply_live(ml, countdown_s=10)
         if name is None:
             self.status=f"Apply failed: {err}"; self.status_col=RED_C; return
         import time
-        self._live_countdown_until=time.time()+15
+        self._live_countdown_until=time.time()+10
         self.status=f"🔴 Applied {name} — press ✓ Keep (A/START) or it reverts"
         self.status_col=YELLOW
         self._schedule_resync()
