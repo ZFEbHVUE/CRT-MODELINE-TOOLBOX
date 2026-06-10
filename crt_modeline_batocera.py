@@ -1282,6 +1282,7 @@ class App:
     def _apply_geometry(self, *_):
         if self._res and self._r_live:
             self._refresh_display(self._res, self._r_live)
+            self._live_schedule()
 
     def _refresh_display(self, res, r_live):
         self._res=res; self._r_live=r_live
@@ -1579,6 +1580,9 @@ class App:
             sr=" SR✓" if sr_ok else " SR✗"
             self.status=f"Optimised — Vfreq err: {ve:.6f} Hz{sr}"
             self.status_col=GREEN_C if (ve<1e-6 and sr_ok) else YELLOW
+            # In realtime mode, apply the optimised modeline immediately
+            if self._live:
+                self._live_apply_now()
         except Exception as e: self.status=f"Error: {e}"; self.status_col=RED_C
 
     def _save(self):
