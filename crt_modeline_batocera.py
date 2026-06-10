@@ -314,6 +314,35 @@ def get_screen_resolution():
     except: pass
     return 768,576
 
+def get_current_output():
+    """Detect the connected display output name via xrandr (e.g. DP-1, HDMI-1, VGA-1)."""
+    import re
+    try:
+        out=subprocess.check_output(
+            ["xrandr","--display",os.environ.get("DISPLAY",":0.0")],
+            stderr=subprocess.DEVNULL).decode()
+        # Prefer the output that currently has an active mode (contains a '*')
+        active=None; first_conn=None
+        cur=None
+        for line in out.split("\n"):
+            m=re.match(r'^(\S+)\s+connected',line)
+            if m:
+                cur=m.group(1)
+                if first_conn is None: first_conn=cur
+            elif cur and '*' in line:
+                active=cur; cur=None
+        return active or first_conn or "default"
+    except: pass
+    try:
+        # batocera-resolution listOutputs fallback
+        out=subprocess.check_output(
+            ["batocera-resolution","listOutputs"],
+            stderr=subprocess.DEVNULL).decode().strip()
+        first=out.split()[0] if out.split() else ""
+        if first: return first
+    except: pass
+    return "default"
+
 def move_window_center_x11(win_w,win_h,scr_w,scr_h):
     """Move window via XMoveWindow (no WM needed)."""
     x=max(0,(scr_w-win_w)//2); y=max(0,(scr_h-win_h)//2)
@@ -816,6 +845,171 @@ class FileDialog:
                 if u and u.isprintable() and u not in '/\\': self.name+=u
 
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# REAL-TIME XRANDR BACKEND  (safe live apply with out-of-process watchdog)
+# ══════════════════════════════════════════════════════════════════════════════
+LIVE_STATE_FILE = "/tmp/crt_live_revert.json"
+WATCHDOG_SCRIPT = "/tmp/crt_watchdog.py"
+
+# Watchdog runs as a SEPARATE process so a black screen / UI freeze can't kill it.
+# It reads the state file; if 'pending' and the deadline passes with no heartbeat
+# refresh, it reverts to the known-good mode.
+_WATCHDOG_SRC = r"""
+import json, os, time, subprocess, sys
+STATE = "/tmp/crt_live_revert.json"
+def xrandr(args):
+    env=dict(os.environ); env.setdefault("DISPLAY",":0.0")
+    try: subprocess.run(["xrandr"]+args,env=env,
+                        stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=8)
+    except: pass
+def revert(st):
+    out=st.get("output","default"); kg=st.get("known_good_name")
+    kg_ml=st.get("known_good_modeline")
+    if kg:
+        xrandr(["--output",out,"--mode",kg])
+    if kg_ml:
+        nm=st.get("known_good_tmp","CRT_KNOWNGOOD")
+        xrandr(["--newmode",nm]+kg_ml.split())
+        xrandr(["--addmode",out,nm])
+        xrandr(["--output",out,"--mode",nm])
+while True:
+    try:
+        if not os.path.exists(STATE): break
+        st=json.load(open(STATE))
+        if st.get("state")=="off": break
+        if st.get("state")=="pending":
+            if time.time()>=st.get("deadline",0):
+                revert(st)
+                st["state"]="reverted"
+                json.dump(st,open(STATE,"w"))
+                break
+    except: pass
+    time.sleep(0.4)
+"""
+
+class XrandrLiveBackend:
+    def __init__(self, output):
+        self.output=output or "default"
+        self.known_good_name=None
+        self.known_good_modeline=None
+        self.counter=0
+        self.active_mode=None       # currently applied temp mode name
+        self.confirmed_mode=None    # last user-confirmed temp mode
+        self.watchdog=None
+
+    # ── current mode capture ────────────────────────────────────────────────
+    def capture_known_good(self):
+        """Read the current active mode name (and modeline if available)."""
+        try:
+            out=subprocess.check_output(
+                ["xrandr","--display",os.environ.get("DISPLAY",":0.0"),"--verbose"],
+                stderr=subprocess.DEVNULL).decode()
+        except:
+            out=""
+        cur_out=None; self.known_good_name=None
+        for line in out.split("\n"):
+            m=re.match(r'^(\S+)\s+connected',line)
+            if m: cur_out=m.group(1)
+            # active mode line ends with '*current'
+            m2=re.search(r'^\s+(\d+x\d+\S*)\s.*\*',line)
+            if m2 and cur_out==self.output:
+                self.known_good_name=m2.group(1)
+        if not self.known_good_name:
+            # fallback: first '*' anywhere
+            m=re.search(r'^\s+(\S+)\s.*\*',out,re.MULTILINE)
+            if m: self.known_good_name=m.group(1)
+        return self.known_good_name
+
+    # ── watchdog ────────────────────────────────────────────────────────────
+    def start_watchdog(self):
+        try:
+            with open(WATCHDOG_SCRIPT,"w") as f: f.write(_WATCHDOG_SRC)
+            self._write_state("idle", 0)
+            self.watchdog=subprocess.Popen(
+                ["python3",WATCHDOG_SCRIPT],
+                stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
+                start_new_session=True)
+        except Exception:
+            self.watchdog=None
+
+    def stop_watchdog(self):
+        self._write_state("off", 0)
+        if self.watchdog:
+            try: self.watchdog.terminate()
+            except: pass
+            self.watchdog=None
+        try:
+            if os.path.exists(LIVE_STATE_FILE): os.remove(LIVE_STATE_FILE)
+        except: pass
+
+    def _write_state(self, state, deadline):
+        try:
+            json.dump({"state":state,"output":self.output,
+                       "known_good_name":self.known_good_name,
+                       "known_good_modeline":self.known_good_modeline,
+                       "known_good_tmp":"CRT_KNOWNGOOD",
+                       "deadline":deadline}, open(LIVE_STATE_FILE,"w"))
+        except: pass
+
+    # ── safety validation ───────────────────────────────────────────────────
+    @staticmethod
+    def validate(res, r):
+        """Return (ok, reason). Blocks clearly-unsafe modes before applying."""
+        Hf=res["Hfreq"]; Va=res["Vfreq_actual"]
+        hmin=r.get("hmin",15000)*0.97; hmax=r.get("hmax",16500)*1.03
+        if not (hmin<=Hf<=hmax):
+            return False, f"Hfreq {Hf/1000:.2f}kHz out of monitor range"
+        if not (40<=Va<=130):
+            return False, f"Vfreq {Va:.1f}Hz unsafe"
+        pclk=res["pclk"]
+        if pclk<5 or pclk>200:
+            return False, f"pclk {pclk:.1f}MHz unsafe"
+        return True, ""
+
+    # ── apply ───────────────────────────────────────────────────────────────
+    def _xrandr(self, args):
+        env=dict(os.environ); env.setdefault("DISPLAY",":0.0")
+        subprocess.run(["xrandr"]+args,env=env,check=True,
+                       stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=8)
+
+    def apply_live(self, modeline_str, countdown_s=15):
+        """Create + apply a temp mode, arm the revert deadline. Returns mode name."""
+        self.counter+=1
+        name=f"CRT_LIVE_{self.counter:03d}"
+        try:
+            self._xrandr(["--newmode",name]+modeline_str.split())
+            self._xrandr(["--addmode",self.output,name])
+            self._xrandr(["--output",self.output,"--mode",name])
+        except Exception as e:
+            return None, str(e)
+        prev=self.active_mode
+        self.active_mode=name
+        # arm watchdog revert
+        self._write_state("pending", __import__("time").time()+countdown_s)
+        # cleanup: delete modes older than known-good/confirmed (never the live one)
+        if prev and prev!=self.confirmed_mode:
+            try:
+                self._xrandr(["--delmode",self.output,prev])
+                self._xrandr(["--rmmode",prev])
+            except: pass
+        return name, ""
+
+    def confirm(self):
+        """User confirms current mode is good → becomes known-good, disarm revert."""
+        self.confirmed_mode=self.active_mode
+        self._write_state("idle", 0)
+
+    def revert_now(self):
+        """Manually revert to known-good mode."""
+        try:
+            if self.known_good_name:
+                self._xrandr(["--output",self.output,"--mode",self.known_good_name])
+        except: pass
+        self._write_state("idle", 0)
+
+import json
+
 # ══════════════════════════════════════════════════════════════════════════════
 class App:
     W,H_WIN=640,480
@@ -834,6 +1028,11 @@ class App:
         pygame.key.set_repeat(280, 60)  # repeat: 280ms delay, 60ms interval
         self.clock=pygame.time.Clock()
         self.dialog=None
+        # Real-time live apply
+        self._live=None              # XrandrLiveBackend when active
+        self._live_pending_since=0   # debounce timestamp
+        self._live_countdown_until=0 # revert deadline (UI display)
+        self._resync_at=0            # scheduled display re-sync timestamp
         self.current_tab=0; self._res=None; self._r_live=None
         self._current_range=None; self._custom_mode=False; self._fixed_range=None
         self.status=""; self.status_col=FG2
@@ -862,11 +1061,16 @@ class App:
     # ── BUILD SETUP ──────────────────────────────────────────────────────────
     def _build_setup(self):
         x0,y,W=6,4,self.W-12
-        self.dd_preset=Dropdown(x0,y,220,22,PRESET_NAMES,3,callback=self._apply_preset)
-        self.dd_range=Dropdown(x0+228,y,100,22,["15KHz"],callback=self._on_range_select)
-        self.chk_interlaced=Checkbox(x0+338,y+3,"Int.",callback=lambda v:self._calc())
-        self.ti_output=TextInput(x0+410,y+1,55,20,"DP-1")
-        y+=30
+        self.dd_preset=Dropdown(x0,y,200,22,PRESET_NAMES,3,callback=self._apply_preset)
+        self.dd_range=Dropdown(x0+206,y,84,22,["15KHz"],callback=self._on_range_select)
+        self.chk_interlaced=Checkbox(x0+296,y+3,"Int.",callback=lambda v:self._calc())
+        # Output detected from Batocera at startup
+        detected_out=get_current_output()
+        self.ti_output=TextInput(x0+352,y+1,W-352,20,detected_out,color=ACCENT)
+        y+=28
+        # Custom modeline name row
+        self.ti_mlname=TextInput(x0+86,y+1,W-86,20,"",color=YELLOW,mono=True)
+        y+=26
         self.sw_width=SliderRow(x0,y,W,"H Width (px)",64,3840,640,step=1,is_int=True,fmt="{:.0f}",callback=self._calc)
         y+=SliderRow.H+2
         self.sw_height=SliderRow(x0,y,W,"V Height (px)",32,2160,480,step=1,is_int=True,fmt="{:.0f}",callback=self._calc)
@@ -931,6 +1135,11 @@ class App:
         self.btn_load=Button(x0+bw+gap,y,bw,22,"📂 Load CRT",self._load)
         self.btn_save_ml=Button(x0+(bw+gap)*2,y,bw,22,"🎬 Save ML",self._save_modeline)
         self.btn_load_ml=Button(x0+(bw+gap)*3,y,bw,22,"📂 Load ML",self._load_modeline)
+        y+=28
+        # Row 3: Realtime live-apply + Confirm/Revert
+        self.chk_live=Checkbox(x0,y+3,"🔴 Realtime",callback=self._toggle_live)
+        self.btn_confirm=Button(x0+120,y,bw,22,"✓ Keep",self._live_confirm)
+        self.btn_revert=Button(x0+120+bw+gap,y,bw,22,"↩ Revert",self._live_revert)
 
     # ── LOGIC ────────────────────────────────────────────────────────────────
     def _build_verify(self):
@@ -1148,6 +1357,7 @@ class App:
             self.sw_hfp_px.set_value(res["HFP"]); self.sw_hs_px.set_value(res["HSYNC"])
             self.sw_hbp_px.set_value(res["HBP"]); self.sw_vfp_px.set_value(res["VFP"])
             self.sw_vs_px.set_value(res["VSYNC"]); self.sw_vbp_px.set_value(res["VBP"])
+            self._live_schedule()
         except: pass
 
     def _from_pixels(self):
@@ -1204,8 +1414,9 @@ class App:
         if not self._res: return ""
         rg=getattr(self,'_rg',self._res)
         if not rg: return ""
-        i=rg["interlaced"]; H=rg["X1"]; V=rg["Y1"]; name=f"{H}x{V}{'i' if i else ''}"
-        ml=self._modeline_str(); out=self.ti_output.value or "DP-1"
+        i=rg["interlaced"]; H=rg["X1"]; V=rg["Y1"]
+        name=self.ti_mlname.value.strip() or f"{H}x{V}{'i' if i else ''}"
+        ml=self._modeline_str(); out=self.ti_output.value or "default"
         return (f'xrandr --newmode "{name}" {ml}\n'
                 f'xrandr --addmode {out} "{name}"\n'
                 f'xrandr --output {out} --mode "{name}"')
@@ -1221,10 +1432,62 @@ class App:
     def _apply_xrandr(self):
         xr=self._xrandr_str()
         if not xr: return
-        for cmd in [l for l in xr.split("\n") if l.strip()]:
-            try: subprocess.run(cmd.split(),check=True)
+        for line in [l for l in xr.split("\n") if l.strip()]:
+            try: subprocess.run(line.split(),check=True)
             except Exception as e: self.status=f"Error: {e}"; self.status_col=RED_C; return
         self.status="Modeline applied!"; self.status_col=GREEN_C
+        self._schedule_resync()
+
+    # ── REAL-TIME LIVE APPLY ─────────────────────────────────────────────────
+    def _toggle_live(self, on):
+        if on:
+            out=self.ti_output.value or "default"
+            self._live=XrandrLiveBackend(out)
+            kg=self._live.capture_known_good()
+            self._live.start_watchdog()
+            self.status=f"🔴 Realtime ON — known-good: {kg or '?'} (edit to apply)"
+            self.status_col=YELLOW
+        else:
+            if self._live:
+                self._live.revert_now(); self._live.stop_watchdog()
+            self._live=None; self._live_countdown_until=0
+            self.status="Realtime OFF — reverted to known-good"
+            self.status_col=FG2
+            self._schedule_resync()
+
+    def _live_schedule(self):
+        """Called whenever a parameter changes; arms debounce in realtime mode."""
+        if self._live:
+            import time
+            self._live_pending_since=time.time()
+
+    def _live_apply_now(self):
+        """Validate + apply the current modeline live (after debounce)."""
+        if not self._live or not self._res: return
+        ok,reason=XrandrLiveBackend.validate(self._res, self._r_live or {})
+        if not ok:
+            self.status=f"⛔ Blocked: {reason}"; self.status_col=RED_C; return
+        ml=self._modeline_str()
+        name,err=self._live.apply_live(ml, countdown_s=15)
+        if name is None:
+            self.status=f"Apply failed: {err}"; self.status_col=RED_C; return
+        import time
+        self._live_countdown_until=time.time()+15
+        self.status=f"🔴 Applied {name} — press ✓ Keep (A/START) or it reverts"
+        self.status_col=YELLOW
+        self._schedule_resync()
+
+    def _live_confirm(self):
+        if self._live and self._live.active_mode:
+            self._live.confirm(); self._live_countdown_until=0
+            self.status=f"✓ Kept {self._live.active_mode} as known-good"
+            self.status_col=GREEN_C
+
+    def _live_revert(self):
+        if self._live:
+            self._live.revert_now(); self._live_countdown_until=0
+            self.status="↩ Reverted to known-good"; self.status_col=FG2
+            self._schedule_resync()
 
     def _optimise(self):
         try:
@@ -1364,11 +1627,13 @@ class App:
         def fn(surf):
             y=4
             # Monitor / Range row
-            draw_text(surf,"Monitor:",6,y+5,FG2,11); self.dd_preset.draw(surf)
-            draw_text(surf,"Range:",228,y+5,FG2,11); self.dd_range.draw(surf)
+            self.dd_preset.draw(surf)
+            self.dd_range.draw(surf)
             self.chk_interlaced.draw(surf)
-            draw_text(surf,"Out:",390,y+5,FG2,11); self.ti_output.draw(surf)
-            y+=30; draw_rect(surf,pygame.Rect(6,y-2,self.W-12,1),BG3)
+            draw_text(surf,"Out:",318,y+5,FG2,10); self.ti_output.draw(surf)
+            y+=28
+            draw_text(surf,"ML name:",6,y+5,FG2,11); self.ti_mlname.draw(surf)
+            y+=26; draw_rect(surf,pygame.Rect(6,y-2,self.W-12,1),BG3)
             # Parameters
             draw_text(surf,"Parameters",6,y+2,ACCENT,11,bold=True); y+=18
             for sw in (self.sw_width,self.sw_height,self.sw_hfreq,self.sw_vfreq):
@@ -1460,7 +1725,20 @@ class App:
             # Row 2: Save/Load CRT | Save/Load Modeline
             for btn in (self.btn_save,self.btn_load,self.btn_save_ml,self.btn_load_ml):
                 btn.rect.y=y; btn.draw(surf)
-            y+=28; draw_rect(surf,pygame.Rect(6,y,self.W-12,1),BG3); y+=6
+            y+=28
+            # Row 3: Realtime live-apply
+            self.chk_live.rect.y=y+3; self.chk_live.draw(surf)
+            self.btn_confirm.rect.y=y; self.btn_revert.rect.y=y
+            if self._live:
+                self.btn_confirm.draw(surf); self.btn_revert.draw(surf)
+            y+=26
+            # Countdown bar when a live mode is armed
+            if self._live and self._live_countdown_until>0:
+                import time as _t
+                rem=max(0,self._live_countdown_until-_t.time())
+                draw_text(surf,f"⏱ Reverting in {rem:.0f}s — press ✓ Keep (or A/START)",
+                          6,y,RED_C if rem<5 else YELLOW,11,bold=True); y+=16
+            y+=2; draw_rect(surf,pygame.Rect(6,y,self.W-12,1),BG3); y+=6
             if not self._res:
                 draw_text(surf,"No modeline — calculate first",self.W//2,y+20,FG2,12,anchor="midtop"); return
             res=self._res; r=self._r_live or {}; t=calc_timings(res)
@@ -1491,7 +1769,7 @@ class App:
             crt_calc=fmt_crt_range(r,t["HFP_us"],t["HSYNC_us"],t["HBP_us"],t["VFP_ms"],t["VSYNC_ms"],t["VBP_ms"])
             draw_text(surf,"CRT Range (calculated):",6,y,ACCENT,10,bold=True); y+=13
             draw_text(surf,crt_calc,6,y,YELLOW,9); y+=13; y+=4
-            name=f"{H}x{V}{'i' if i else ''}"; ml=self._modeline_str()
+            name=self.ti_mlname.value.strip() or f"{H}x{V}{'i' if i else ''}"; ml=self._modeline_str()
             draw_text(surf,"Modeline:",6,y,ACCENT,10,bold=True); y+=13
             draw_text(surf,f'"{name}" {ml}',6,y,YELLOW,9); y+=13; y+=4
             draw_text(surf,"xrandr commands:",6,y,ACCENT,10,bold=True); y+=13
@@ -1608,6 +1886,7 @@ class App:
         if t==0:
             return [None,
                     self.dd_preset,self.dd_range,self.chk_interlaced,
+                    self.ti_output,self.ti_mlname,
                     self.sw_width,self.sw_height,self.sw_hfreq,self.sw_vfreq,
                     self.btn_parse,self.btn_import,
                     self.sw_hfp_px,self.sw_hs_px,self.sw_hbp_px,
@@ -1618,11 +1897,14 @@ class App:
                     self.sw_hfp,self.sw_hs,self.sw_hbp,
                     self.sw_vfp,self.sw_vs,self.sw_vbp]
         elif t==2:
-            return [None,
+            base=[None,
                     self.btn_copy,self.btn_apply,self.btn_opt,
                     self.chk_vfp_lock,self.ti_vfp_val,
                     self.btn_save,self.btn_load,
-                    self.btn_save_ml,self.btn_load_ml]
+                    self.btn_save_ml,self.btn_load_ml,
+                    self.chk_live]
+            if self._live: base+=[self.btn_confirm,self.btn_revert]
+            return base
         elif t==3:
             return [None,self.ti_verify,self.btn_verify,self.btn_verify_load,self.dd_verify_mon]
         return [None]
@@ -1721,7 +2003,7 @@ class App:
 
     def _widgets_for_tab(self,tab):
         if tab==0:
-            return [self.dd_preset,self.dd_range,self.chk_interlaced,self.ti_output,
+            return [self.dd_preset,self.dd_range,self.chk_interlaced,self.ti_output,self.ti_mlname,
                     self.sw_width,self.sw_height,self.sw_hfreq,self.sw_vfreq,
                     self.ti_paste,self.btn_parse,self.ti_import,self.btn_import,
                     self.sw_hfp_px,self.sw_hs_px,self.sw_hbp_px,
@@ -1730,9 +2012,12 @@ class App:
         elif tab==1:
             return [self.sw_hfp,self.sw_hs,self.sw_hbp,self.sw_vfp,self.sw_vs,self.sw_vbp]
         elif tab==2:
-            return [self.btn_copy,self.btn_apply,self.btn_opt,
+            w=[self.btn_copy,self.btn_apply,self.btn_opt,
                     self.chk_vfp_lock,self.ti_vfp_val,
-                    self.btn_save,self.btn_load,self.btn_save_ml,self.btn_load_ml]
+                    self.btn_save,self.btn_load,self.btn_save_ml,self.btn_load_ml,
+                    self.chk_live]
+            if self._live: w+=[self.btn_confirm,self.btn_revert]
+            return w
         elif tab==3:
             return [self.ti_verify,self.btn_verify,self.btn_verify_load,self.dd_verify_mon]
         return []
@@ -1776,6 +2061,9 @@ class App:
                 continue
             # Joystick buttons
             if event.type==pygame.JOYBUTTONDOWN:
+                # When a live revert countdown is armed, A/START confirms "keep"
+                if self._live and self._live_countdown_until>0 and event.button in (0,9):
+                    self._live_confirm(); continue
                 if event.button in (0,1):   self._activate_focused()   # A/B
                 elif event.button==4: self._manual_scroll(-80)         # LB scroll up
                 elif event.button==5: self._manual_scroll(+80)         # RB scroll down
@@ -1826,6 +2114,8 @@ class App:
                     continue
 
                 if event.key==pygame.K_ESCAPE: return False
+                elif event.key==pygame.K_c and self._live and self._live_countdown_until>0:
+                    self._live_confirm()
                 elif event.key==pygame.K_TAB:
                     d=-1 if (event.mod&pygame.KMOD_SHIFT) else 1; self._nav_next(d)
                 elif event.key in (pygame.K_DOWN,pygame.K_s): self._nav_next(+1)
@@ -1872,10 +2162,58 @@ class App:
             for w in self._widgets_for_tab(self.current_tab): w.handle(adj)
         return True
 
+    def _schedule_resync(self, delay=0.6):
+        """Re-read screen resolution after a mode change and re-center the canvas."""
+        import time
+        self._resync_at=time.time()+delay
+
+    def _resync_display(self):
+        """Re-detect resolution; rebuild window + re-center canvas if it changed."""
+        new_w,new_h=get_screen_resolution()
+        if (new_w,new_h)!=(self.scr_w,self.scr_h):
+            self.scr_w,self.scr_h=new_w,new_h
+            try:
+                self.screen=pygame.display.set_mode((self.scr_w,self.scr_h))
+            except Exception:
+                pass
+            self.cx=(self.scr_w-self.W)//2
+            self.cy=(self.scr_h-self.H_WIN)//2
+            self.status=f"Display re-synced → {new_w}x{new_h} (toolbox re-centered)"
+            self.status_col=GREEN_C
+
+    def _live_tick(self):
+        """Process debounce + countdown + display resync each frame."""
+        import time
+        now=time.time()
+        # Display re-sync after a mode change (resolution may have changed)
+        if self._resync_at>0 and now>=self._resync_at:
+            self._resync_at=0
+            self._resync_display()
+        if not self._live: return
+        # Debounce: apply ~280ms after last change (and not mid slider-drag)
+        if self._live_pending_since>0 and now-self._live_pending_since>0.28:
+            dragging=any(getattr(w,'slider',None) and w.slider.dragging
+                         for w in self._widgets_for_tab(self.current_tab)
+                         if isinstance(w,SliderRow))
+            if not dragging:
+                self._live_pending_since=0
+                self._live_apply_now()
+        # Countdown display only (the out-of-process watchdog does the real revert)
+        if self._live_countdown_until>0 and now>=self._live_countdown_until:
+            self._live_countdown_until=0
+            self.status="↩ Auto-reverted (no confirm) — known-good restored"
+            self.status_col=RED_C
+            self._schedule_resync(1.0)
+
     def run(self):
         while True:
             if not self.handle_events(): break
+            self._live_tick()
             self.draw(); self.clock.tick(30)
+        # cleanup watchdog on exit
+        if self._live:
+            try: self._live.stop_watchdog()
+            except: pass
         pygame.quit(); sys.exit()
 
 # ══════════════════════════════════════════════════════════════════════════════
