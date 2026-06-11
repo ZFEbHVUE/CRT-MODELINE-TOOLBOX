@@ -849,66 +849,66 @@ class FileDialog:
 # ══════════════════════════════════════════════════════════════════════════════
 # REAL-TIME XRANDR BACKEND  (safe live apply with out-of-process watchdog)
 # ══════════════════════════════════════════════════════════════════════════════
-LIVE_STATE_FILE = "/tmp/crt_live_revert.json"
-WATCHDOG_SCRIPT = "/tmp/crt_watchdog.py"
+LIVE_STATE_FILE = "/tmp/crt_live_revert.sh"   # shell-sourceable state
+WATCHDOG_SCRIPT = "/tmp/crt_watchdog.sh"
+WATCHDOG_LOG    = "/tmp/crt_watchdog.log"
 
-# Watchdog runs as a SEPARATE process so a black screen / UI freeze can't kill it.
-# It reads the state file; if 'pending' and the deadline passes with no heartbeat
-# refresh, it reverts to the known-good mode.
-_WATCHDOG_SRC = r"""
-import json, os, time, subprocess
-STATE = "/tmp/crt_live_revert.json"
+# Watchdog is a BASH script (sh is always present on Batocera; no python3-launch
+# dependency). It runs as a SEPARATE process so a black screen / UI freeze can't
+# kill it. It sources the state file; if state=pending and the deadline passes,
+# it reverts to the known-good mode (full modeline, then name, then --auto).
+_WATCHDOG_SRC = r'''#!/bin/sh
+STATE="/tmp/crt_live_revert.sh"
+LOG="/tmp/crt_watchdog.log"
+: "${DISPLAY:=:0.0}"
+export DISPLAY
+log(){ echo "$(date +%H:%M:%S) $*" >> "$LOG" 2>/dev/null; }
+log "watchdog started (DISPLAY=$DISPLAY)"
+revert(){
+  log "REVERT out=$OUTPUT name=$KG_NAME"
+  done=0
+  if [ -n "$KG_MODELINE" ]; then
+    # remove any stale CRT_KNOWNGOOD from a previous session first
+    xrandr --delmode "$OUTPUT" CRT_KNOWNGOOD >/dev/null 2>&1
+    xrandr --rmmode CRT_KNOWNGOOD >/dev/null 2>&1
+    xrandr --newmode CRT_KNOWNGOOD $KG_MODELINE 2>>"$LOG"
+    xrandr --addmode "$OUTPUT" CRT_KNOWNGOOD 2>>"$LOG"
+    if xrandr --output "$OUTPUT" --mode CRT_KNOWNGOOD 2>>"$LOG"; then done=1; fi
+  fi
+  if [ "$done" = "0" ] && [ -n "$KG_NAME" ]; then
+    if xrandr --output "$OUTPUT" --mode "$KG_NAME" 2>>"$LOG"; then done=1; fi
+  fi
+  if [ "$done" = "0" ]; then
+    log "fallback --auto"
+    xrandr --output "$OUTPUT" --auto 2>>"$LOG"
+  fi
+  log "revert done=$done"
+}
+while true; do
+  [ -f "$STATE" ] || { log "no state, exit"; break; }
+  STATE_VAL=""; OUTPUT=""; DEADLINE=0; KG_NAME=""; KG_MODELINE=""
+  . "$STATE" 2>/dev/null
+  if [ "$STATE_VAL" = "off" ]; then log "off, exit"; break; fi
+  if [ "$STATE_VAL" = "pending" ]; then
+    NOW=$(date +%s)
+    if [ "$NOW" -ge "$DEADLINE" ]; then
+      log "deadline reached"
+      revert
+      # keep KG info so the NEXT pending can still revert; stay alive
+      {
+        echo "STATE_VAL=reverted"
+        echo "OUTPUT=$OUTPUT"
+        echo "DEADLINE=0"
+        echo "KG_NAME=\"$KG_NAME\""
+        echo "KG_MODELINE=\"$KG_MODELINE\""
+      } > "$STATE"
+      log "watchdog stays alive for next apply"
+    fi
+  fi
+  sleep 1
+done
+'''
 LOG   = "/tmp/crt_watchdog.log"
-def log(msg):
-    try:
-        with open(LOG,"a") as f: f.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
-    except: pass
-def xrandr(args):
-    env=dict(os.environ); env.setdefault("DISPLAY",":0.0")
-    try:
-        r=subprocess.run(["xrandr"]+args,env=env,
-                         stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=8)
-        log("xrandr "+" ".join(args)+f"  rc={r.returncode}")
-        return r.returncode==0
-    except Exception as e:
-        log("xrandr ERROR "+str(e)); return False
-def revert(st):
-    out=st.get("output","default")
-    kg=st.get("known_good_name"); kg_ml=st.get("known_good_modeline")
-    log(f"REVERT output={out} name={kg} ml={'yes' if kg_ml else 'no'}")
-    done=False
-    # 1) revert by recreating the full known-good modeline (most reliable)
-    if kg_ml:
-        nm="CRT_KNOWNGOOD"
-        xrandr(["--newmode",nm]+kg_ml.split())   # may already exist, ignore
-        xrandr(["--addmode",out,nm])
-        if xrandr(["--output",out,"--mode",nm]): done=True
-    # 2) revert by mode name
-    if not done and kg:
-        if xrandr(["--output",out,"--mode",kg]): done=True
-    # 3) last resort: let xrandr pick the preferred mode
-    if not done:
-        xrandr(["--output",out,"--auto"])
-    log("revert done="+str(done))
-log("watchdog started")
-while True:
-    try:
-        if not os.path.exists(STATE):
-            log("state file gone, exit"); break
-        st=json.load(open(STATE))
-        s=st.get("state")
-        if s=="off":
-            log("state off, exit"); break
-        if s=="pending" and time.time()>=st.get("deadline",0):
-            log("deadline reached, reverting")
-            revert(st)
-            st["state"]="reverted"
-            json.dump(st,open(STATE,"w"))
-            break
-    except Exception as e:
-        log("loop error "+str(e))
-    time.sleep(0.4)
-"""
 
 class XrandrLiveBackend:
     def __init__(self, output):
@@ -916,9 +916,29 @@ class XrandrLiveBackend:
         self.known_good_name=None
         self.known_good_modeline=None
         self.counter=0
-        self.active_mode=None       # currently applied temp mode name
-        self.confirmed_mode=None    # last user-confirmed temp mode
+        self.session=os.getpid()%10000   # unique per session → no stale-name collision
+        self.active_mode=None            # currently applied temp mode name
+        self.active_modeline=None        # its modeline string (for confirm→known-good)
+        self.confirmed_mode=None         # last user-confirmed temp mode
         self.watchdog=None
+
+    def cleanup_stale_modes(self):
+        """Remove CRT_LIVE_* / CRT_KNOWNGOOD modes left over from previous sessions."""
+        try:
+            out=subprocess.check_output(
+                ["xrandr","--display",os.environ.get("DISPLAY",":0.0")],
+                stderr=subprocess.DEVNULL).decode()
+        except Exception:
+            return
+        for line in out.split("\n"):
+            mt=re.match(r'^\s+(CRT_(?:LIVE|KNOWNGOOD)\S*)',line)
+            if mt:
+                nm=mt.group(1)
+                if '*' in line: continue   # never touch the active mode
+                try: self._xrandr(["--delmode",self.output,nm])
+                except: pass
+                try: self._xrandr(["--rmmode",nm])
+                except: pass
 
     # ── current mode capture ────────────────────────────────────────────────
     def capture_known_good(self):
@@ -973,13 +993,17 @@ class XrandrLiveBackend:
 
     # ── watchdog ────────────────────────────────────────────────────────────
     def start_watchdog(self):
+        self.watchdog=None
         try:
-            try: os.remove("/tmp/crt_watchdog.log")
+            try: os.remove(WATCHDOG_LOG)
             except: pass
             with open(WATCHDOG_SCRIPT,"w") as f: f.write(_WATCHDOG_SRC)
+            os.chmod(WATCHDOG_SCRIPT, 0o755)
             self._write_state("idle", 0)
+            env=dict(os.environ); env.setdefault("DISPLAY",":0.0")
+            # Launch via 'sh' (always present); detached so UI death can't kill it
             self.watchdog=subprocess.Popen(
-                ["python3",WATCHDOG_SCRIPT],
+                ["sh",WATCHDOG_SCRIPT],env=env,
                 stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
                 start_new_session=True)
         except Exception:
@@ -995,13 +1019,24 @@ class XrandrLiveBackend:
             if os.path.exists(LIVE_STATE_FILE): os.remove(LIVE_STATE_FILE)
         except: pass
 
+    def ensure_watchdog(self):
+        """Restart the watchdog if it is not running (it must NEVER be dead
+        while realtime mode is active)."""
+        if self.watchdog is None or self.watchdog.poll() is not None:
+            self.start_watchdog()
+        return self.watchdog is not None and self.watchdog.poll() is None
+
     def _write_state(self, state, deadline):
+        """Write shell-sourceable state file for the bash watchdog."""
         try:
-            json.dump({"state":state,"output":self.output,
-                       "known_good_name":self.known_good_name,
-                       "known_good_modeline":self.known_good_modeline,
-                       "known_good_tmp":"CRT_KNOWNGOOD",
-                       "deadline":deadline}, open(LIVE_STATE_FILE,"w"))
+            ml=self.known_good_modeline or ""
+            nm=self.known_good_name or ""
+            with open(LIVE_STATE_FILE,"w") as f:
+                f.write(f'STATE_VAL={state}\n')
+                f.write(f'OUTPUT={self.output}\n')
+                f.write(f'DEADLINE={int(deadline)}\n')
+                f.write(f'KG_NAME="{nm}"\n')
+                f.write(f'KG_MODELINE="{ml}"\n')
         except: pass
 
     # ── safety validation ───────────────────────────────────────────────────
@@ -1026,19 +1061,38 @@ class XrandrLiveBackend:
                        stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=8)
 
     def apply_live(self, modeline_str, countdown_s=10):
-        """Create + apply a temp mode, arm the revert deadline. Returns mode name."""
+        """Create + apply a temp mode, arm the revert deadline. Returns (name, err)."""
         self.counter+=1
-        name=f"CRT_LIVE_{self.counter:03d}"
+        name=f"CRT_LIVE_{self.session}_{self.counter:03d}"   # unique per session
+        # Arm the watchdog FIRST, so even if the apply blacks out the screen
+        # mid-call, the revert deadline is already set.
+        import time
+        self._write_state("pending", time.time()+countdown_s)
+        # remove any stale leftover with the same name (paranoia)
+        try: self._xrandr(["--rmmode",name])
+        except: pass
+        err=""
         try:
             self._xrandr(["--newmode",name]+modeline_str.split())
-            self._xrandr(["--addmode",self.output,name])
-            self._xrandr(["--output",self.output,"--mode",name])
         except Exception as e:
-            return None, str(e)
+            err=f"newmode: {e}"
+        if not err:
+            try: self._xrandr(["--addmode",self.output,name])
+            except Exception as e: err=f"addmode: {e}"
+        if not err:
+            try: self._xrandr(["--output",self.output,"--mode",name])
+            except Exception as e: err=f"setmode: {e}"
+        if err:
+            # screen unchanged → disarm the pointless revert, clean the half-made mode
+            self._write_state("idle", 0)
+            try: self._xrandr(["--delmode",self.output,name])
+            except: pass
+            try: self._xrandr(["--rmmode",name])
+            except: pass
+            return None, err
         prev=self.active_mode
         self.active_mode=name
-        # arm watchdog revert
-        self._write_state("pending", __import__("time").time()+countdown_s)
+        self.active_modeline=modeline_str
         # cleanup: delete modes older than known-good/confirmed (never the live one)
         if prev and prev!=self.confirmed_mode:
             try:
@@ -1048,19 +1102,39 @@ class XrandrLiveBackend:
         return name, ""
 
     def confirm(self):
-        """User confirms current mode is good → becomes known-good, disarm revert."""
-        self.confirmed_mode=self.active_mode
+        """User confirms current mode is good → it BECOMES the known-good,
+        so any later revert returns to it (not to the boot mode)."""
+        if self.active_mode:
+            self.confirmed_mode=self.active_mode
+            self.known_good_name=self.active_mode
+            if self.active_modeline:
+                self.known_good_modeline=self.active_modeline
         self._write_state("idle", 0)
 
     def revert_now(self):
-        """Manually revert to known-good mode."""
-        try:
-            if self.known_good_name:
+        """Manually revert to known-good (same cascade as the watchdog:
+        full modeline → mode name → --auto)."""
+        done=False
+        if self.known_good_modeline:
+            try: self._xrandr(["--delmode",self.output,"CRT_KNOWNGOOD"])
+            except: pass
+            try: self._xrandr(["--rmmode","CRT_KNOWNGOOD"])
+            except: pass
+            try:
+                self._xrandr(["--newmode","CRT_KNOWNGOOD"]+self.known_good_modeline.split())
+                self._xrandr(["--addmode",self.output,"CRT_KNOWNGOOD"])
+                self._xrandr(["--output",self.output,"--mode","CRT_KNOWNGOOD"])
+                done=True
+            except: pass
+        if not done and self.known_good_name:
+            try:
                 self._xrandr(["--output",self.output,"--mode",self.known_good_name])
-        except: pass
+                done=True
+            except: pass
+        if not done:
+            try: self._xrandr(["--output",self.output,"--auto"])
+            except: pass
         self._write_state("idle", 0)
-
-import json
 
 # ══════════════════════════════════════════════════════════════════════════════
 class App:
@@ -1410,6 +1484,7 @@ class App:
             self.sw_hfp_px.set_value(res["HFP"]); self.sw_hs_px.set_value(res["HSYNC"])
             self.sw_hbp_px.set_value(res["HBP"]); self.sw_vfp_px.set_value(res["VFP"])
             self.sw_vs_px.set_value(res["VSYNC"]); self.sw_vbp_px.set_value(res["VBP"])
+            self._rg=None  # base changed → drop stale geometry-adjusted modeline
             self._live_schedule()
         except: pass
 
@@ -1430,6 +1505,8 @@ class App:
                            Y1=V,Y2=V+VFP,Y3=V+VFP+VSYNC,Y4=V_tot,
                            HFP=HFP,HSYNC=HSYNC,HBP=HBP,VFP=VFP,VSYNC=VSYNC,VBP=VBP,
                            pclk=pclk,Hfreq=Hf,Vfreq_actual=Vf_act,interlaced=i)
+            self._rg=None  # direct px edit → this is the live modeline
+            self._live_schedule()
         except: pass
 
     def _parse_paste(self):
@@ -1457,15 +1534,14 @@ class App:
         self._calc(); self.status="CRT Range parsed — Custom mode"; self.status_col=GREEN_C
 
     def _modeline_str(self):
-        rg=getattr(self,'_rg',self._res)
+        rg=self._rg if getattr(self,'_rg',None) else self._res
         if not rg: return ""
         istr=" interlace" if rg["interlaced"] else ""
         return (f"{rg['pclk']:.6f} {rg['X1']} {rg['X2']} {rg['X3']} {rg['X4']} "
                 f"{rg['Y1']} {rg['Y2']} {rg['Y3']} {rg['Y4']}{istr} -hsync -vsync")
 
     def _xrandr_str(self):
-        if not self._res: return ""
-        rg=getattr(self,'_rg',self._res)
+        rg=self._rg if getattr(self,'_rg',None) else self._res
         if not rg: return ""
         i=rg["interlaced"]; H=rg["X1"]; V=rg["Y1"]
         name=self.ti_mlname.value.strip() or f"{H}x{V}{'i' if i else ''}"
@@ -1483,6 +1559,10 @@ class App:
             self.status="xclip not available"; self.status_col=YELLOW
 
     def _apply_xrandr(self):
+        # In realtime mode, manual Apply MUST go through the protected backend
+        # (watchdog armed); otherwise a bad mode = black screen with no revert.
+        if self._live:
+            self._live_apply_now(); return
         xr=self._xrandr_str()
         if not xr: return
         for line in [l for l in xr.split("\n") if l.strip()]:
@@ -1496,10 +1576,17 @@ class App:
         if on:
             out=self.ti_output.value or "default"
             self._live=XrandrLiveBackend(out)
+            self._live.cleanup_stale_modes()   # purge CRT_LIVE_*/CRT_KNOWNGOOD leftovers
             kg=self._live.capture_known_good()
             self._live.start_watchdog()
+            wd_ok=self._live.watchdog is not None and self._live.watchdog.poll() is None
             has_ml="+ml" if self._live.known_good_modeline else "no-ml"
-            if kg:
+            if not wd_ok:
+                self.status=f"⛔ Watchdog FAILED to start — realtime unsafe, disabled"
+                self.status_col=RED_C
+                self.chk_live.checked=False
+                self._live.stop_watchdog(); self._live=None
+            elif kg:
                 self.status=f"🔴 Realtime ON — known-good: {kg} ({has_ml}) on {out}"
                 self.status_col=YELLOW
             else:
@@ -1525,6 +1612,10 @@ class App:
         ok,reason=XrandrLiveBackend.validate(self._res, self._r_live or {})
         if not ok:
             self.status=f"⛔ Blocked: {reason}"; self.status_col=RED_C; return
+        # Watchdog MUST be alive before we touch the screen
+        if not self._live.ensure_watchdog():
+            self.status="⛔ Watchdog dead and could not restart — apply blocked"
+            self.status_col=RED_C; return
         ml=self._modeline_str()
         name,err=self._live.apply_live(ml, countdown_s=10)
         if name is None:
@@ -2251,6 +2342,19 @@ class App:
             self._resync_at=0
             self._resync_display()
         if not self._live: return
+        # Detect a revert performed by the out-of-process watchdog (~1x/s)
+        if now-getattr(self,'_live_state_poll',0)>1.0:
+            self._live_state_poll=now
+            try:
+                with open(LIVE_STATE_FILE) as f: st=f.read()
+                if "STATE_VAL=reverted" in st:
+                    self._live_countdown_until=0
+                    self._live.active_mode=None
+                    self._live._write_state("idle",0)   # ack → back to idle
+                    self.status="↩ Watchdog reverted to known-good (mode not confirmed)"
+                    self.status_col=RED_C
+                    self._schedule_resync(0.5)
+            except Exception: pass
         # Debounce: apply ~280ms after last change (and not mid slider-drag)
         if self._live_pending_since>0 and now-self._live_pending_since>0.28:
             dragging=any(getattr(w,'slider',None) and w.slider.dragging
@@ -2262,9 +2366,9 @@ class App:
         # Countdown display only (the out-of-process watchdog does the real revert)
         if self._live_countdown_until>0 and now>=self._live_countdown_until:
             self._live_countdown_until=0
-            self.status="↩ Auto-reverted (no confirm) — known-good restored"
+            self.status="⏱ Countdown expired — watchdog reverting…"
             self.status_col=RED_C
-            self._schedule_resync(1.0)
+            self._schedule_resync(1.5)
 
     def run(self):
         while True:
