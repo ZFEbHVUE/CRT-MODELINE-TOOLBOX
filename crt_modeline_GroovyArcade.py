@@ -1077,6 +1077,22 @@ class XrandrLiveBackend:
             return False, f"pclk {pclk:.1f}MHz unsafe"
         return True, ""
 
+    @staticmethod
+    def validate_modeline_str(ml, r):
+        """Validate the EXACT modeline string that will be applied (geometry-
+        adjusted), not just the base calc: structure, monotonicity, porches,
+        and real Hfreq/Vfreq recomputed from its own numbers."""
+        res=verify_modeline(ml)
+        if not res:
+            return False, "malformed modeline"
+        if not (res["X1"]<res["X2"]<res["X3"]<res["X4"]):
+            return False, f"H timings not monotonic ({res['X1']} {res['X2']} {res['X3']} {res['X4']})"
+        if not (res["Y1"]<res["Y2"]<res["Y3"]<res["Y4"]):
+            return False, f"V timings not monotonic ({res['Y1']} {res['Y2']} {res['Y3']} {res['Y4']})"
+        if min(res["HFP"],res["HSYNC"],res["HBP"],res["VFP"],res["VSYNC"],res["VBP"])<1:
+            return False, "porch/sync < 1"
+        return XrandrLiveBackend.validate(res, r)
+
     # ── apply ───────────────────────────────────────────────────────────────
     def _xrandr(self, args):
         env=dict(os.environ); env.setdefault("DISPLAY",":0.0")
@@ -1190,6 +1206,7 @@ class App:
         self._live=None              # XrandrLiveBackend when active
         self._live_pending_since=0   # debounce timestamp
         self._live_countdown_until=0 # revert deadline (UI display)
+        self._live_first_unconfirmed=0 # deadline-cap anchor (anti button-mashing)
         self._resync_at=0            # scheduled display re-sync timestamp
         self.current_tab=0; self._res=None; self._r_live=None
         self._current_range=None; self._custom_mode=False; self._fixed_range=None
@@ -1641,22 +1658,32 @@ class App:
     def _live_apply_now(self):
         """Validate + apply the current modeline live (after debounce)."""
         if not self._live or not self._res: return
-        ok,reason=XrandrLiveBackend.validate(self._res, self._r_live or {})
+        import time
+        ml=self._modeline_str()
+        # Validate the EXACT modeline being applied (geometry-adjusted)
+        ok,reason=XrandrLiveBackend.validate_modeline_str(ml, self._r_live or {})
         if not ok:
             self.status=f"⛔ Blocked: {reason}"; self.status_col=RED_C; return
         # Watchdog MUST be alive before we touch the screen
         if not self._live.ensure_watchdog():
             self.status="⛔ Watchdog dead and could not restart — apply blocked"
             self.status_col=RED_C; return
-        ml=self._modeline_str()
-        name,err=self._live.apply_live(ml, countdown_s=10)
+        # DEADLINE CAP: while a mode is unconfirmed, re-applies (e.g. blind
+        # button mashing during a black screen) must NOT push the revert
+        # forever. Hard ceiling: first unconfirmed apply + 25s.
+        now=time.time()
+        if self._live_first_unconfirmed==0:
+            self._live_first_unconfirmed=now
+        cap=self._live_first_unconfirmed+25
+        countdown=min(10, cap-now)
+        if countdown<2:
+            self.status="⛔ Too many unconfirmed applies — ✓ Keep or wait for revert"
+            self.status_col=RED_C; return
+        name,err=self._live.apply_live(ml, countdown_s=countdown)
         if name is None:
             self.status=f"Apply failed: {err}"; self.status_col=RED_C; return
-        import time
-        self._live_countdown_until=time.time()+10
+        self._live_countdown_until=now+countdown
         if err:
-            # setmode uncertain (e.g. xrandr timeout on slow DP→VGA renegotiation):
-            # screen state unknown, watchdog stays armed and WILL revert
             self.status=f"⚠ {err}"
             self.status_col=RED_C
         else:
@@ -1667,12 +1694,14 @@ class App:
     def _live_confirm(self):
         if self._live and self._live.active_mode:
             self._live.confirm(); self._live_countdown_until=0
+            self._live_first_unconfirmed=0
             self.status=f"✓ Kept {self._live.active_mode} as known-good"
             self.status_col=GREEN_C
 
     def _live_revert(self):
         if self._live:
             self._live.revert_now(); self._live_countdown_until=0
+            self._live_first_unconfirmed=0
             self.status="↩ Reverted to known-good"; self.status_col=FG2
             self._schedule_resync()
 
@@ -2387,6 +2416,7 @@ class App:
                 with open(LIVE_STATE_FILE) as f: st=f.read()
                 if "STATE_VAL=reverted" in st:
                     self._live_countdown_until=0
+                    self._live_first_unconfirmed=0
                     self._live.active_mode=None
                     self._live._write_state("idle",0)   # ack → back to idle
                     self.status="↩ Watchdog reverted to known-good (mode not confirmed)"
@@ -2409,10 +2439,21 @@ class App:
             self._schedule_resync(1.5)
 
     def run(self):
-        while True:
-            if not self.handle_events(): break
-            self._live_tick()
-            self.draw(); self.clock.tick(30)
+        try:
+            while True:
+                if not self.handle_events(): break
+                self._live_tick()
+                self.draw(); self.clock.tick(30)
+        except Exception:
+            # NEVER die leaving a black screen: revert, log, clean up
+            import traceback
+            try:
+                with open("/tmp/crt_toolbox_crash.log","w") as f:
+                    f.write(traceback.format_exc())
+            except: pass
+            if self._live:
+                try: self._live.revert_now()
+                except: pass
         # cleanup watchdog on exit
         if self._live:
             try: self._live.stop_watchdog()
