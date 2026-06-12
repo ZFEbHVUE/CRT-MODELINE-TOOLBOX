@@ -5,7 +5,7 @@
 # 640×480 — no Tkinter needed, only pygame
 # Usage: DISPLAY=:0 python3 crt_modeline_batocera.py
 # ==============================================================================
-import pygame, sys, math, os, re, subprocess
+import pygame, sys, math, os, re, subprocess, signal, atexit
 
 # ── Colours ────────────────────────────────────────────────────────────────────
 BG      = (30, 30, 46)
@@ -294,13 +294,14 @@ def select_range(preset_name, hfreq_hz):
     return p["ranges"][0]
 
 def get_screen_resolution():
-    """Get current resolution via batocera-resolution."""
+    """Get current resolution. Tries batocera-resolution (Batocera), then
+    xrandr active mode (GroovyArcade / generic X11), then framebuffer size."""
     import re
     try:
         out=subprocess.check_output(
             ["batocera-resolution","currentMode"],
             env={**os.environ,"DISPLAY":os.environ.get("DISPLAY",":0.0")},
-            stderr=subprocess.DEVNULL).decode().strip()
+            stderr=subprocess.DEVNULL,timeout=5).decode().strip()
         # Format: 769x576.50.00
         m=re.match(r'(\d+)x(\d+)',out)
         if m: return int(m.group(1)),int(m.group(2))
@@ -308,7 +309,13 @@ def get_screen_resolution():
     try:
         out=subprocess.check_output(
             ["xrandr","--display",os.environ.get("DISPLAY",":0.0")],
-            stderr=subprocess.DEVNULL).decode()
+            stderr=subprocess.DEVNULL,timeout=5).decode()
+        # Prefer the ACTIVE mode (line with '*') — on GroovyArcade the
+        # framebuffer 'current W x H' can differ from the real mode
+        for line in out.split("\n"):
+            if '*' in line:
+                m=re.match(r'^\s+(\d+)x(\d+)',line)
+                if m: return int(m.group(1)),int(m.group(2))
         m=re.search(r'current (\d+) x (\d+)',out)
         if m: return int(m.group(1)),int(m.group(2))
     except: pass
@@ -320,7 +327,7 @@ def get_current_output():
     try:
         out=subprocess.check_output(
             ["xrandr","--display",os.environ.get("DISPLAY",":0.0")],
-            stderr=subprocess.DEVNULL).decode()
+            stderr=subprocess.DEVNULL,timeout=5).decode()
         # Prefer the output that currently has an active mode (contains a '*')
         active=None; first_conn=None
         cur=None
@@ -337,11 +344,41 @@ def get_current_output():
         # batocera-resolution listOutputs fallback
         out=subprocess.check_output(
             ["batocera-resolution","listOutputs"],
-            stderr=subprocess.DEVNULL).decode().strip()
+            stderr=subprocess.DEVNULL,timeout=5).decode().strip()
         first=out.split()[0] if out.split() else ""
         if first: return first
     except: pass
     return "default"
+
+# ── Frontend pause: ES/Attract read the joystick directly via evdev, in
+# parallel with the toolbox (no X focus involved). Freeze them (SIGSTOP)
+# while the toolbox runs so button presses don't launch games behind us;
+# resume (SIGCONT) on exit.
+FRONTEND_PROCS=("emulationstation","attract")
+_paused_pids=[]
+
+def pause_frontend():
+    global _paused_pids
+    _paused_pids=[]
+    for proc in FRONTEND_PROCS:
+        try:
+            out=subprocess.check_output(["pidof",proc],timeout=3).decode().split()
+            for p in out:
+                try:
+                    os.kill(int(p),signal.SIGSTOP)
+                    _paused_pids.append(int(p))
+                except: pass
+        except: pass
+    return _paused_pids
+
+def resume_frontend():
+    global _paused_pids
+    for pid in _paused_pids:
+        try: os.kill(pid,signal.SIGCONT)
+        except: pass
+    _paused_pids=[]
+
+atexit.register(resume_frontend)
 
 def move_window_center_x11(win_w,win_h,scr_w,scr_h):
     """Move window via XMoveWindow (no WM needed)."""
@@ -889,7 +926,7 @@ while true; do
   STATE_VAL=""; OUTPUT=""; DEADLINE=0; KG_NAME=""; KG_MODELINE=""
   . "$STATE" 2>/dev/null
   if [ "$STATE_VAL" = "off" ]; then log "off, exit"; break; fi
-  if [ "$STATE_VAL" = "pending" ]; then
+  if [ "$STATE_VAL" = "pending" ] && [ "$DEADLINE" -gt 0 ] 2>/dev/null; then
     NOW=$(date +%s)
     if [ "$NOW" -ge "$DEADLINE" ]; then
       log "deadline reached"
@@ -927,7 +964,7 @@ class XrandrLiveBackend:
         try:
             out=subprocess.check_output(
                 ["xrandr","--display",os.environ.get("DISPLAY",":0.0")],
-                stderr=subprocess.DEVNULL).decode()
+                stderr=subprocess.DEVNULL,timeout=5).decode()
         except Exception:
             return
         for line in out.split("\n"):
@@ -948,7 +985,7 @@ class XrandrLiveBackend:
         try:
             out=subprocess.check_output(
                 ["xrandr","--display",os.environ.get("DISPLAY",":0.0")],
-                stderr=subprocess.DEVNULL).decode()
+                stderr=subprocess.DEVNULL,timeout=5).decode()
             cur_out=None
             for line in out.split("\n"):
                 mc=re.match(r'^(\S+)\s+connected',line)
@@ -962,7 +999,7 @@ class XrandrLiveBackend:
         try:
             v=subprocess.check_output(
                 ["xrandr","--display",os.environ.get("DISPLAY",":0.0"),"--verbose"],
-                stderr=subprocess.DEVNULL).decode()
+                stderr=subprocess.DEVNULL,timeout=5).decode()
             self.known_good_modeline=self._extract_active_modeline(v)
         except Exception: pass
         return self.known_good_name
@@ -1027,16 +1064,20 @@ class XrandrLiveBackend:
         return self.watchdog is not None and self.watchdog.poll() is None
 
     def _write_state(self, state, deadline):
-        """Write shell-sourceable state file for the bash watchdog."""
+        """Write shell-sourceable state file ATOMICALLY (tmp + rename), so the
+        bash watchdog can never source a half-written file (which would give
+        DEADLINE=0 → instant revert)."""
         try:
             ml=self.known_good_modeline or ""
             nm=self.known_good_name or ""
-            with open(LIVE_STATE_FILE,"w") as f:
+            tmp=LIVE_STATE_FILE+".tmp"
+            with open(tmp,"w") as f:
                 f.write(f'STATE_VAL={state}\n')
                 f.write(f'OUTPUT={self.output}\n')
                 f.write(f'DEADLINE={int(deadline)}\n')
                 f.write(f'KG_NAME="{nm}"\n')
                 f.write(f'KG_MODELINE="{ml}"\n')
+            os.replace(tmp,LIVE_STATE_FILE)
         except: pass
 
     # ── safety validation ───────────────────────────────────────────────────
@@ -1079,17 +1120,24 @@ class XrandrLiveBackend:
         if not err:
             try: self._xrandr(["--addmode",self.output,name])
             except Exception as e: err=f"addmode: {e}"
-        if not err:
-            try: self._xrandr(["--output",self.output,"--mode",name])
-            except Exception as e: err=f"setmode: {e}"
         if err:
-            # screen unchanged → disarm the pointless revert, clean the half-made mode
+            # newmode/addmode failed → screen PROVABLY untouched → safe to disarm
             self._write_state("idle", 0)
             try: self._xrandr(["--delmode",self.output,name])
             except: pass
             try: self._xrandr(["--rmmode",name])
             except: pass
             return None, err
+        try:
+            self._xrandr(["--output",self.output,"--mode",name])
+        except Exception as e:
+            # CRITICAL: a setmode error/TIMEOUT does NOT prove the screen is
+            # unchanged — with slow DP→VGA renegotiation the mode may have been
+            # applied anyway (black screen). KEEP the watchdog armed: a revert
+            # is harmless if the screen didn't change, lifesaving if it did.
+            self.active_mode=name
+            self.active_modeline=modeline_str
+            return name, f"setmode uncertain ({e}) — watchdog stays armed"
         prev=self.active_mode
         self.active_mode=name
         self.active_modeline=modeline_str
@@ -1143,6 +1191,8 @@ class App:
     TABS=["Setup","CRT","Results","Verify","Diagram"]
 
     def __init__(self):
+        n=len(pause_frontend())
+        if n: print(f"Frontend paused ({n} process) — will resume on exit")
         pygame.init()
         # Open window at full screen resolution, draw 640x480 canvas centered
         self.scr_w,self.scr_h=get_screen_resolution()
@@ -1622,8 +1672,14 @@ class App:
             self.status=f"Apply failed: {err}"; self.status_col=RED_C; return
         import time
         self._live_countdown_until=time.time()+10
-        self.status=f"🔴 Applied {name} — press ✓ Keep (A/START) or it reverts"
-        self.status_col=YELLOW
+        if err:
+            # setmode uncertain (e.g. xrandr timeout on slow DP→VGA renegotiation):
+            # screen state unknown, watchdog stays armed and WILL revert
+            self.status=f"⚠ {err}"
+            self.status_col=RED_C
+        else:
+            self.status=f"🔴 Applied {name} — press ✓ Keep (A/START) or it reverts"
+            self.status_col=YELLOW
         self._schedule_resync()
 
     def _live_confirm(self):
@@ -2379,6 +2435,7 @@ class App:
         if self._live:
             try: self._live.stop_watchdog()
             except: pass
+        resume_frontend()
         pygame.quit(); sys.exit()
 
 # ══════════════════════════════════════════════════════════════════════════════
