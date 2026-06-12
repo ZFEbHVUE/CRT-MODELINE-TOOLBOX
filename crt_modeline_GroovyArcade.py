@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # ==============================================================================
-# CRT MODELINE TOOLBOX — BATOCERA / PYGAME VERSION
+# CRT MODELINE TOOLBOX — GROOVYARCADE / PYGAME VERSION
 # Stéphane "ZFEbHVUE" — v2.5
 # 640×480 — no Tkinter needed, only pygame
-# Usage: DISPLAY=:0 python3 crt_modeline_batocera.py
+# Usage: DISPLAY=:0 python3 crt_modeline_GroovyArcade.py
 # ==============================================================================
 import pygame, sys, math, os, re, subprocess
 
@@ -294,18 +294,8 @@ def select_range(preset_name, hfreq_hz):
     return p["ranges"][0]
 
 def get_screen_resolution():
-    """Get current resolution. Tries batocera-resolution (Batocera), then
-    xrandr active mode (GroovyArcade / generic X11), then framebuffer size."""
+    """Get current resolution from the active xrandr mode (GroovyArcade / X11)."""
     import re
-    try:
-        out=subprocess.check_output(
-            ["batocera-resolution","currentMode"],
-            env={**os.environ,"DISPLAY":os.environ.get("DISPLAY",":0.0")},
-            stderr=subprocess.DEVNULL).decode().strip()
-        # Format: 769x576.50.00
-        m=re.match(r'(\d+)x(\d+)',out)
-        if m: return int(m.group(1)),int(m.group(2))
-    except: pass
     try:
         out=subprocess.check_output(
             ["xrandr","--display",os.environ.get("DISPLAY",":0.0")],
@@ -339,14 +329,6 @@ def get_current_output():
             elif cur and '*' in line:
                 active=cur; cur=None
         return active or first_conn or "default"
-    except: pass
-    try:
-        # batocera-resolution listOutputs fallback
-        out=subprocess.check_output(
-            ["batocera-resolution","listOutputs"],
-            stderr=subprocess.DEVNULL).decode().strip()
-        first=out.split()[0] if out.split() else ""
-        if first: return first
     except: pass
     return "default"
 
@@ -860,7 +842,7 @@ LIVE_STATE_FILE = "/tmp/crt_live_revert.sh"   # shell-sourceable state
 WATCHDOG_SCRIPT = "/tmp/crt_watchdog.sh"
 WATCHDOG_LOG    = "/tmp/crt_watchdog.log"
 
-# Watchdog is a BASH script (sh is always present on Batocera; no python3-launch
+# Watchdog is a BASH script (sh is always present; no python3-launch
 # dependency). It runs as a SEPARATE process so a black screen / UI freeze can't
 # kill it. It sources the state file; if state=pending and the deadline passes,
 # it reverts to the known-good mode (full modeline, then name, then --auto).
@@ -1197,7 +1179,7 @@ class App:
         self.dd_preset=Dropdown(x0,y,200,22,PRESET_NAMES,3,callback=self._apply_preset)
         self.dd_range=Dropdown(x0+206,y,84,22,["15KHz"],callback=self._on_range_select)
         self.chk_interlaced=Checkbox(x0+296,y+3,"Int.",callback=lambda v:self._calc())
-        # Output detected from Batocera at startup
+        # Output auto-detected via xrandr at startup
         detected_out=get_current_output()
         self.ti_output=TextInput(x0+352,y+1,W-352,20,detected_out,color=ACCENT)
         y+=28
@@ -1285,7 +1267,7 @@ class App:
         self._verify_res=None
 
     def _load_verify(self):
-        d="/userdata" if os.path.isdir("/userdata") else os.path.expanduser("~")
+        d=os.path.expanduser("~")
         self.dialog=FileDialog("Load Modeline to Verify",d,"load","",self._do_load_verify)
 
     def _do_load_verify(self,path):
@@ -1444,7 +1426,7 @@ class App:
         if not self._res: return
         rg=getattr(self,"_rg",self._res)
         name=f"modeline_{rg['X1']}x{rg['Y1']}{'i' if rg['interlaced'] else ''}"
-        d="/userdata" if os.path.isdir("/userdata") else os.path.expanduser("~")
+        d=os.path.expanduser("~")
         self.dialog=FileDialog("Save Modeline",d,"save",name,self._do_save_ml)
 
     def _do_save_ml(self,path):
@@ -1459,7 +1441,7 @@ class App:
         except Exception as e: self.status=f"Save error: {e}"; self.status_col=RED_C
 
     def _load_modeline(self):
-        d="/userdata" if os.path.isdir("/userdata") else os.path.expanduser("~")
+        d=os.path.expanduser("~")
         self.dialog=FileDialog("Load Modeline",d,"load","",self._do_load_ml)
 
     def _do_load_ml(self,path):
@@ -1687,7 +1669,7 @@ class App:
         if not self._res: return
         rg=getattr(self,"_rg",self._res)
         name=f"crt_range_{rg['X1']}x{rg['Y1']}{'i' if rg['interlaced'] else ''}"
-        d="/userdata" if os.path.isdir("/userdata") else os.path.expanduser("~")
+        d=os.path.expanduser("~")
         self.dialog=FileDialog("Save CRT Range",d,"save",name,self._do_save_crt)
 
     def _do_save_crt(self,path):
@@ -1705,7 +1687,7 @@ class App:
         except Exception as e: self.status=f"Save error: {e}"; self.status_col=RED_C
 
     def _load(self):
-        d="/userdata" if os.path.isdir("/userdata") else os.path.expanduser("~")
+        d=os.path.expanduser("~")
         self.dialog=FileDialog("Load CRT Range",d,"load","",self._do_load_crt)
 
     def _do_load_crt(self,path):

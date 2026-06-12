@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
 # CRT Modeline Toolbox — GroovyArcade launcher
-# Copy this script + crt_modeline_batocera.py to ~ (e.g. /home/arcade)
+# Copy this script + crt_modeline_GroovyArcade.py to ~ (e.g. /home/arcade)
 # Usage:  bash run_toolbox_groovyarcade.sh
 # ============================================================
 
