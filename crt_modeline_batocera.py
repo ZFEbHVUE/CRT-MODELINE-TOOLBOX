@@ -1502,13 +1502,14 @@ class App:
 
     def _save_modeline(self):
         if not self._res: return
-        rg=getattr(self,"_rg",self._res)
+        rg=self._rg if getattr(self,"_rg",None) else self._res
         name=f"modeline_{rg['X1']}x{rg['Y1']}{'i' if rg['interlaced'] else ''}"
         d="/userdata" if os.path.isdir("/userdata") else os.path.expanduser("~")
         self.dialog=FileDialog("Save Modeline",d,"save",name,self._do_save_ml)
 
     def _do_save_ml(self,path):
-        rg=getattr(self,"_rg",self._res); r=self._r_live or {}; t=calc_timings(rg)
+        rg=self._rg if getattr(self,"_rg",None) else self._res
+        r=self._r_live or {}; t=calc_timings(rg)
         name=f"{rg['X1']}x{rg['Y1']}{'i' if rg['interlaced'] else ''}"
         try:
             with open(path,"w") as f:
@@ -1763,13 +1764,14 @@ class App:
 
     def _save(self):
         if not self._res: return
-        rg=getattr(self,"_rg",self._res)
+        rg=self._rg if getattr(self,"_rg",None) else self._res
         name=f"crt_range_{rg['X1']}x{rg['Y1']}{'i' if rg['interlaced'] else ''}"
         d="/userdata" if os.path.isdir("/userdata") else os.path.expanduser("~")
         self.dialog=FileDialog("Save CRT Range",d,"save",name,self._do_save_crt)
 
     def _do_save_crt(self,path):
-        res=getattr(self,"_rg",self._res); r=self._r_live or {}; t=calc_timings(res)
+        res=self._rg if getattr(self,"_rg",None) else self._res
+        r=self._r_live or {}; t=calc_timings(res)
         name=f"{res['X1']}x{res['Y1']}{'i' if res['interlaced'] else ''}"
         crt_calc=fmt_crt_range(r,t["HFP_us"],t["HSYNC_us"],t["HBP_us"],
                                  t["VFP_ms"],t["VSYNC_ms"],t["VBP_ms"])
@@ -2457,21 +2459,30 @@ class App:
             self._schedule_resync(1.5)
 
     def run(self):
-        try:
-            while True:
+        consecutive_errors=0
+        while True:
+            try:
                 if not self.handle_events(): break
                 self._live_tick()
                 self.draw(); self.clock.tick(30)
-        except Exception:
-            # NEVER die leaving a black screen: revert, log, clean up
-            import traceback
-            try:
-                with open("/tmp/crt_toolbox_crash.log","w") as f:
-                    f.write(traceback.format_exc())
-            except: pass
-            if self._live:
-                try: self._live.revert_now()
+                consecutive_errors=0
+            except Exception as e:
+                # An error in a handler must NOT kill the app (and must not
+                # silently eat the bug either): log it, show it, keep running.
+                import traceback
+                consecutive_errors+=1
+                try:
+                    with open("/tmp/crt_toolbox_crash.log","a") as f:
+                        f.write(traceback.format_exc()+"\n")
                 except: pass
+                self.status=f"⚠ Internal error: {type(e).__name__}: {e}"
+                self.status_col=RED_C
+                if consecutive_errors>20:
+                    # genuine crash loop → revert and exit safely
+                    if self._live:
+                        try: self._live.revert_now()
+                        except: pass
+                    break
         # cleanup watchdog on exit
         if self._live:
             try: self._live.stop_watchdog()
